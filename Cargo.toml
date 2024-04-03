@@ -15,7 +15,6 @@ license = "Apache-2.0"
 [dependencies]
 concread = "0.5.0"
 thiserror = "1.0.58"
-tokio = { version = "1.37.0", features = ["sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt", "macros"] }
