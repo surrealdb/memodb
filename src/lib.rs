@@ -16,11 +16,16 @@
 
 pub mod db;
 pub mod err;
-pub mod inner;
-pub mod kv;
 pub mod tx;
 
+pub(crate) mod inner;
+
+#[cfg(test)]
+pub(crate) mod kv;
+
+#[doc(inline)]
 pub use self::db::*;
+#[doc(inline)]
 pub use self::err::*;
-pub use self::kv::*;
+#[doc(inline)]
 pub use self::tx::*;

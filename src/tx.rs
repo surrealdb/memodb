@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This module stores the database transaction logic.
+
 use crate::err::Error;
 use crate::inner::Inner;
 use concread::bptree::BptreeMap;
@@ -22,6 +24,7 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// A serializable database transaction
 pub struct Tx<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
@@ -42,7 +45,7 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Sync + Send + 'static,
 {
-	// Create a transaction
+	/// Create a new read-only transaction
 	pub(crate) fn read(db: Pin<Arc<BptreeMap<K, V>>>, tx: BptreeMapReadTxn<'_, K, V>) -> Tx<K, V> {
 		let tx = unsafe {
 			std::mem::transmute::<BptreeMapReadTxn<'_, K, V>, BptreeMapReadTxn<'static, K, V>>(tx)
@@ -54,7 +57,7 @@ where
 			_db: db,
 		}
 	}
-	// Create a transaction
+	/// Create a new writeable transaction
 	pub(crate) fn write(
 		db: Pin<Arc<BptreeMap<K, V>>>,
 		tx: BptreeMapWriteTxn<'_, K, V>,
@@ -69,11 +72,11 @@ where
 			_db: db,
 		}
 	}
-	// Check if closed
+	/// Check if the transaction is closed
 	pub fn closed(&self) -> bool {
 		self.ok
 	}
-	// Cancel a transaction
+	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -90,7 +93,7 @@ where
 		// Continue
 		Ok(())
 	}
-	// Commit a transaction
+	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -111,7 +114,7 @@ where
 		// Continue
 		Ok(())
 	}
-	// Check if a key exists
+	/// Check if a key exists in the database
 	pub fn exi(&self, key: K) -> Result<bool, Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -122,7 +125,7 @@ where
 		// Return result
 		Ok(res)
 	}
-	// Fetch a key from the database
+	/// Fetch a key from the database
 	pub fn get(&self, key: K) -> Result<Option<V>, Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -133,7 +136,7 @@ where
 		// Return result
 		Ok(res)
 	}
-	// Insert or update a key in the database
+	/// Insert or update a key in the database
 	pub fn set(&mut self, key: K, val: V) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -148,7 +151,7 @@ where
 		// Return result
 		Ok(())
 	}
-	// Insert a key if it doesn't exist in the database
+	/// Insert a key if it doesn't exist in the database
 	pub fn put(&mut self, key: K, val: V) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -166,7 +169,7 @@ where
 		// Return result
 		Ok(())
 	}
-	// Insert a key if it matches a value
+	/// Insert a key if it matches a value
 	pub fn putc(&mut self, key: K, val: V, chk: Option<V>) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -185,7 +188,7 @@ where
 		// Return result
 		Ok(())
 	}
-	// Delete a key
+	/// Delete a key from the database
 	pub fn del(&mut self, key: K) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -200,7 +203,7 @@ where
 		// Return result
 		Ok(())
 	}
-	// Delete a key if it matches a value
+	/// Delete a key if it matches a value
 	pub fn delc(&mut self, key: K, chk: Option<V>) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {
@@ -219,7 +222,7 @@ where
 		// Return result
 		Ok(())
 	}
-	// Retrieve a range of keys from the databases
+	/// Retrieve a range of keys from the databases
 	pub fn scan(&self, rng: Range<K>, limit: usize) -> Result<Vec<(K, V)>, Error> {
 		// Check to see if transaction is closed
 		if self.ok == true {

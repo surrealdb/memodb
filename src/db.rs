@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This module stores the core in-memory database type.
+
 use crate::err::Error;
 use crate::tx::Tx;
 use concread::bptree::BptreeMap;
@@ -19,6 +21,7 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// A transactional in-memory database
 pub struct Db<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
@@ -27,7 +30,7 @@ where
 	pub(crate) db: Pin<Arc<BptreeMap<K, V>>>,
 }
 
-// Open a new database
+/// Create a new transactional in-memory database
 pub fn new<K, V>() -> Db<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
@@ -43,7 +46,7 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Sync + Send + 'static,
 {
-	// Start a new transaction
+	/// Start a new read-only or writeable transaction
 	pub async fn begin(&self, write: bool) -> Result<Tx<K, V>, Error> {
 		match write {
 			true => Ok(Tx::write(self.db.clone(), self.db.write())),
