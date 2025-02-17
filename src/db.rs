@@ -14,43 +14,48 @@
 
 //! This module stores the core in-memory database type.
 
+use crate::entry::Entry;
 use crate::err::Error;
 use crate::tx::Tx;
-use concread::bptree::BptreeMap;
+use bplustree::BPlusTree;
 use std::fmt::Debug;
-use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 /// A transactional in-memory database
 pub struct Db<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	pub(crate) db: Pin<Arc<BptreeMap<K, V>>>,
+	/// The current datastore sequence number
+	pub(crate) sn: Arc<AtomicU64>,
+	/// The underlying B+tree
+	pub(crate) db: Arc<BPlusTree<K, Vec<Entry<V>>>>,
 }
 
 /// Create a new transactional in-memory database
 pub fn new<K, V>() -> Db<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	Db {
-		db: Arc::pin(BptreeMap::new()),
+		sn: Arc::new(AtomicU64::new(0)),
+		db: Arc::new(BPlusTree::new()),
 	}
 }
 
 impl<K, V> Db<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Start a new read-only or writeable transaction
-	pub async fn begin(&self, write: bool) -> Result<Tx<K, V>, Error> {
+	pub fn begin(&self, write: bool) -> Result<Tx<K, V>, Error> {
 		match write {
-			true => Ok(Tx::write(self.db.clone(), self.db.write())),
-			false => Ok(Tx::read(self.db.clone(), self.db.read())),
+			true => Ok(Tx::write(self.sn.clone(), self.db.clone())),
+			false => Ok(Tx::read(self.sn.clone(), self.db.clone())),
 		}
 	}
 }
@@ -61,38 +66,24 @@ mod tests {
 	use super::*;
 	use crate::kv::{Key, Val};
 
-	#[tokio::test]
-	async fn begin_tx_readable() {
+	#[test]
+	fn begin_tx_readable() {
 		let db: Db<Key, Val> = new();
-		let tx = db.begin(false).await;
+		let tx = db.begin(false);
+		assert!(tx.is_ok());
+	}
+
+	#[test]
+	fn begin_tx_writeable() {
+		let db: Db<Key, Val> = new();
+		let tx = db.begin(true);
 		assert!(tx.is_ok());
 	}
 
 	#[tokio::test]
-	async fn begin_tx_writeable() {
-		let db: Db<Key, Val> = new();
-		let tx = db.begin(true).await;
-		assert!(tx.is_ok());
-	}
-
-	#[tokio::test]
-	async fn begin_tx_readable_async() {
-		let db: Db<Key, Val> = new();
-		let tx = async { db.begin(false).await };
-		assert!(tx.await.is_ok());
-	}
-
-	#[tokio::test]
-	async fn begin_tx_writeable_async() {
-		let db: Db<Key, Val> = new();
-		let tx = async { db.begin(true).await };
-		assert!(tx.await.is_ok());
-	}
-
-	#[tokio::test]
-	async fn writeable_tx_across_async() {
+	async fn writeable_tx_async() {
 		let db: Db<&str, &str> = new();
-		let mut tx = db.begin(true).await.unwrap();
+		let mut tx = db.begin(true).unwrap();
 		let res = async { tx.put("test", "something") }.await;
 		assert!(res.is_ok());
 		let res = async { tx.get("test") }.await;
@@ -101,11 +92,11 @@ mod tests {
 		assert!(res.is_ok());
 	}
 
-	#[tokio::test]
-	async fn readable_tx_not_writable() {
+	#[test]
+	fn readable_tx_not_writable() {
 		let db: Db<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(false).await.unwrap();
+		let mut tx = db.begin(false).unwrap();
 		let res = tx.put("test", "something");
 		assert!(res.is_err());
 		let res = tx.set("test", "something");
@@ -118,11 +109,11 @@ mod tests {
 		assert!(res.is_ok());
 	}
 
-	#[tokio::test]
-	async fn finished_tx_not_writeable() {
+	#[test]
+	fn finished_tx_not_writeable() {
 		let db: Db<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(false).await.unwrap();
+		let mut tx = db.begin(false).unwrap();
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		let res = tx.put("test", "something");
@@ -137,11 +128,11 @@ mod tests {
 		assert!(res.is_err());
 	}
 
-	#[tokio::test]
-	async fn cancelled_tx_is_cancelled() {
+	#[test]
+	fn cancelled_tx_is_cancelled() {
 		let db: Db<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).await.unwrap();
+		let mut tx = db.begin(true).unwrap();
 		tx.put("test", "something").unwrap();
 		let res = tx.exi("test").unwrap();
 		assert_eq!(res, true);
@@ -150,7 +141,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false).await.unwrap();
+		let mut tx = db.begin(false).unwrap();
 		let res = tx.exi("test").unwrap();
 		assert_eq!(res, false);
 		let res = tx.get("test").unwrap();
@@ -159,11 +150,11 @@ mod tests {
 		assert!(res.is_ok());
 	}
 
-	#[tokio::test]
-	async fn committed_tx_is_committed() {
+	#[test]
+	fn committed_tx_is_committed() {
 		let db: Db<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).await.unwrap();
+		let mut tx = db.begin(true).unwrap();
 		tx.put("test", "something").unwrap();
 		let res = tx.exi("test").unwrap();
 		assert_eq!(res, true);
@@ -172,7 +163,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false).await.unwrap();
+		let mut tx = db.begin(false).unwrap();
 		let res = tx.exi("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx.get("test").unwrap();
@@ -181,11 +172,11 @@ mod tests {
 		assert!(res.is_ok());
 	}
 
-	#[tokio::test]
-	async fn multiple_concurrent_readers() {
+	#[test]
+	fn multiple_concurrent_readers() {
 		let db: Db<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).await.unwrap();
+		let mut tx = db.begin(true).unwrap();
 		tx.put("test", "something").unwrap();
 		let res = tx.exi("test").unwrap();
 		assert_eq!(res, true);
@@ -194,13 +185,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.begin(false).await.unwrap();
+		let mut tx1 = db.begin(false).unwrap();
 		let res = tx1.exi("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx1.exi("temp").unwrap();
 		assert_eq!(res, false);
 		// ----------
-		let mut tx2 = db.begin(false).await.unwrap();
+		let mut tx2 = db.begin(false).unwrap();
 		let res = tx2.exi("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx2.exi("temp").unwrap();
@@ -212,11 +203,11 @@ mod tests {
 		assert!(res.is_ok());
 	}
 
-	#[tokio::test]
-	async fn multiple_concurrent_operators() {
+	#[test]
+	fn multiple_concurrent_operators() {
 		let db: Db<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).await.unwrap();
+		let mut tx = db.begin(true).unwrap();
 		tx.put("test", "something").unwrap();
 		let res = tx.exi("test").unwrap();
 		assert_eq!(res, true);
@@ -225,13 +216,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.begin(false).await.unwrap();
+		let mut tx1 = db.begin(false).unwrap();
 		let res = tx1.exi("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx1.exi("temp").unwrap();
 		assert_eq!(res, false);
 		// ----------
-		let mut txw = db.begin(true).await.unwrap();
+		let mut txw = db.begin(true).unwrap();
 		txw.put("temp", "other").unwrap();
 		let res = txw.exi("test").unwrap();
 		assert_eq!(res, true);
@@ -240,7 +231,7 @@ mod tests {
 		let res = txw.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx2 = db.begin(false).await.unwrap();
+		let mut tx2 = db.begin(false).unwrap();
 		let res = tx2.exi("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx2.exi("temp").unwrap();

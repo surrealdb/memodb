@@ -18,7 +18,8 @@ pub mod db;
 pub mod err;
 pub mod tx;
 
-pub(crate) mod inner;
+pub(crate) mod entry;
+pub(crate) mod merge;
 
 #[cfg(test)]
 pub(crate) mod kv;

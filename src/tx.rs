@@ -14,156 +14,236 @@
 
 //! This module stores the database transaction logic.
 
+use crate::entry::Entry;
 use crate::err::Error;
-use crate::inner::Inner;
-use concread::bptree::BptreeMap;
-use concread::bptree::BptreeMapReadTxn;
-use concread::bptree::BptreeMapWriteTxn;
+use crate::merge::MergeExt;
+use crate::merge::RawIterWrapper;
+use bplustree::BPlusTree;
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::mem::take;
 use std::ops::Range;
-use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// A serializable database transaction
+/// A snapshot serializable isolated database transaction
 pub struct Tx<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	// Is the transaction complete?
-	pub(crate) ok: bool,
-	// Is the transaction read+write?
-	pub(crate) rw: bool,
-	// The underlying datastore transaction
-	pub(crate) tx: Inner<K, V>,
-	// The parent datastore for this transaction
-	_db: Pin<Arc<BptreeMap<K, V>>>,
+	/// Is the transaction complete?
+	done: bool,
+	/// Is the transaction writeable?
+	write: bool,
+	/// TODO
+	version: u64,
+	/// TODO
+	updates: BTreeMap<K, Option<V>>,
+	/// The parent datastore for this transaction
+	sequence: Arc<AtomicU64>,
+	/// The parent datastore for this transaction
+	datastore: Arc<BPlusTree<K, Vec<Entry<V>>>>,
 }
 
 impl<K, V> Tx<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Create a new read-only transaction
-	pub(crate) fn read(db: Pin<Arc<BptreeMap<K, V>>>, tx: BptreeMapReadTxn<'_, K, V>) -> Tx<K, V> {
-		let tx = unsafe {
-			std::mem::transmute::<BptreeMapReadTxn<'_, K, V>, BptreeMapReadTxn<'static, K, V>>(tx)
-		};
+	pub(crate) fn read(sn: Arc<AtomicU64>, db: Arc<BPlusTree<K, Vec<Entry<V>>>>) -> Tx<K, V> {
 		Tx {
-			ok: false,
-			rw: false,
-			tx: Inner::Read(tx),
-			_db: db,
+			done: false,
+			write: false,
+			version: sn.load(Ordering::SeqCst),
+			updates: BTreeMap::new(),
+			sequence: sn,
+			datastore: db,
 		}
 	}
 	/// Create a new writeable transaction
-	pub(crate) fn write(
-		db: Pin<Arc<BptreeMap<K, V>>>,
-		tx: BptreeMapWriteTxn<'_, K, V>,
-	) -> Tx<K, V> {
-		let tx = unsafe {
-			std::mem::transmute::<BptreeMapWriteTxn<'_, K, V>, BptreeMapWriteTxn<'static, K, V>>(tx)
-		};
+	pub(crate) fn write(sn: Arc<AtomicU64>, db: Arc<BPlusTree<K, Vec<Entry<V>>>>) -> Tx<K, V> {
 		Tx {
-			ok: false,
-			rw: true,
-			tx: Inner::Write(tx),
-			_db: db,
+			done: false,
+			write: true,
+			version: sn.load(Ordering::SeqCst),
+			updates: BTreeMap::new(),
+			sequence: sn,
+			datastore: db,
 		}
 	}
 	/// Check if the transaction is closed
 	pub fn closed(&self) -> bool {
-		self.ok
+		self.done
 	}
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Mark this transaction as done
-		self.ok = true;
+		self.done = true;
 		// Unlock the database mutex
-		match self.tx {
-			Inner::None => unreachable!(),
-			Inner::Read(_) => self.tx = Inner::None,
-			Inner::Write(_) => self.tx = Inner::None,
-		}
+		self.updates.clear();
 		// Continue
 		Ok(())
 	}
 	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.rw == false {
+		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
 		// Mark this transaction as done
-		self.ok = true;
+		self.done = true;
 		// Commit the data
-		match std::mem::take(&mut self.tx) {
-			Inner::None => unreachable!(),
-			Inner::Read(_) => unreachable!(),
-			Inner::Write(v) => v.commit(),
+		for key in self.updates.keys() {
+			// Check if the key has been modified
+			let conflict = self
+				.datastore
+				// Lookup this key from the writeset
+				.lookup(key, |v| {
+					// Get the last entry for this key
+					v.last()
+						// Check if the version is more recent
+						.is_some_and(|v| v.version > self.version)
+				})
+				// Check if there is a more recent entry
+				.is_some_and(|v| v == true);
+			// This key was already modified, so error
+			if conflict {
+				return Err(Error::KeyWriteConflict);
+			}
+		}
+		// Increase the datastore sequence number
+		let version = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+		// Get a mutable iterator over the tree
+		let mut iter = self.datastore.raw_iter_mut();
+		// Loop over the updates in the writeset
+		for (key, value) in take(&mut self.updates) {
+			// Check if this key already exists
+			if iter.seek_exact(&key) {
+				// We know it exists, so we can unwrap
+				iter.next().unwrap().1.push(Entry {
+					version,
+					value,
+				});
+			} else {
+				// Otherwise insert an entry into the tree
+				iter.insert(
+					key,
+					vec![Entry {
+						version,
+						value,
+					}],
+				);
+			}
 		}
 		// Continue
 		Ok(())
 	}
 	/// Check if a key exists in the database
-	pub fn exi(&self, key: K) -> Result<bool, Error> {
+	pub fn exi<T: Borrow<K>>(&self, key: T) -> Result<bool, Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check the key
-		let res = self.tx.exi(&key);
+		let res = match self.updates.get(key.borrow()) {
+			// The key exists in the writeset
+			Some(_) => true,
+			// Check for the key in the tree
+			None => self
+				.datastore
+				.lookup(key.borrow(), |v| {
+					v.iter()
+						// Reverse iterate through the versions
+						.rev()
+						// Get the version prior to this transaction
+						.find(|v| v.version <= self.version)
+						// Check if there is a version prior to this transaction
+						.is_some_and(|v| {
+							// Check if the found entry is a deleted version
+							v.value.is_some()
+						})
+				})
+				.is_some_and(|v| v),
+		};
 		// Return result
 		Ok(res)
 	}
 	/// Fetch a key from the database
-	pub fn get(&self, key: K) -> Result<Option<V>, Error> {
+	pub fn get<T: Borrow<K>>(&self, key: T) -> Result<Option<V>, Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Get the key
-		let res = self.tx.get(&key).cloned();
+		let res = match self.updates.get(key.borrow()) {
+			// The key exists in the writeset
+			Some(v) => v.clone(),
+			// Check for the key in the tree
+			None => self
+				.datastore
+				.lookup(key.borrow(), |v| {
+					v.iter()
+						// Reverse iterate through the versions
+						.rev()
+						// Get the version prior to this transaction
+						.find(|v| v.version <= self.version)
+						// Clone the entry prior to this transaction
+						.cloned()
+						// Return just the entry value
+						.map(|v| v.value)
+				})
+				// The first Option will be None
+				// if the key is not present in
+				// the tree at all.
+				.flatten()
+				// The second Option will be None
+				// if there is no entry prior to
+				// this transaction version.
+				.flatten(),
+		};
 		// Return result
 		Ok(res)
 	}
 	/// Insert or update a key in the database
 	pub fn set(&mut self, key: K, val: V) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.rw == false {
+		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		self.tx.set(key, val);
+		self.updates.insert(key, Some(val));
 		// Return result
 		Ok(())
 	}
 	/// Insert a key if it doesn't exist in the database
 	pub fn put(&mut self, key: K, val: V) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.rw == false {
+		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.tx.exi(&key) {
-			false => self.tx.set(key, val),
+		match self.exi(&key)? {
+			false => self.updates.insert(key, Some(val)),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
 		// Return result
@@ -172,17 +252,17 @@ where
 	/// Insert a key if it matches a value
 	pub fn putc(&mut self, key: K, val: V, chk: Option<V>) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.rw == false {
+		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match (self.tx.get(&key), &chk) {
-			(Some(v), Some(w)) if v == w => self.tx.set(key, val),
-			(None, None) => self.tx.set(key, val),
+		match (self.get(&key)?, &chk) {
+			(Some(v), Some(w)) if v == *w => self.updates.insert(key, Some(val)),
+			(None, None) => self.updates.insert(key, Some(val)),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -191,46 +271,55 @@ where
 	/// Delete a key from the database
 	pub fn del(&mut self, key: K) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.rw == false {
+		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		self.tx.del(&key);
+		self.updates.insert(key, None);
 		// Return result
 		Ok(())
 	}
 	/// Delete a key if it matches a value
 	pub fn delc(&mut self, key: K, chk: Option<V>) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.rw == false {
+		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		match (self.tx.get(&key), &chk) {
-			(Some(v), Some(w)) if v == w => self.tx.del(&key),
-			(None, None) => self.tx.del(&key),
+		match (self.get(&key)?, &chk) {
+			(Some(v), Some(w)) if v == *w => self.updates.insert(key, None),
+			(None, None) => self.updates.insert(key, None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
 		Ok(())
 	}
-	/// Retrieve a range of keys from the databases
+	/*/// Retrieve a range of keys from the databases
 	pub fn scan(&self, rng: Range<K>, limit: usize) -> Result<Vec<(K, V)>, Error> {
 		// Check to see if transaction is closed
-		if self.ok == true {
+		if self.done == true {
 			return Err(Error::TxClosed);
 		}
+		// Get a mutable iterator over the tree
+		let mut tree_iter = self.datastore.raw_iter();
+		let mut tree_iter = RawIterWrapper::new(self.version, &mut tree_iter);
+		//
+		let mut local_iter =
+			self.updates.iter().filter(|(k, v)| v.is_some()).map(|(k, v)| (k, v.as_ref().unwrap()));
+		//
+		let mut iter = tree_iter.merge(local_iter);
+
 		// Scan the keys
-		let res = self.tx.range(rng, limit);
+		let res = todo!();
 		// Return result
 		Ok(res)
-	}
+	}*/
 }
