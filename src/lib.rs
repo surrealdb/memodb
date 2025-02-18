@@ -14,12 +14,10 @@
 
 #![allow(clippy::bool_comparison)]
 
-pub mod db;
-pub mod err;
-pub mod tx;
-
-pub(crate) mod entry;
-pub(crate) mod merge;
+mod db;
+mod entry;
+mod err;
+mod tx;
 
 #[cfg(test)]
 pub(crate) mod kv;

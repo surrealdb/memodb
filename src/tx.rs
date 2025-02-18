@@ -16,8 +16,6 @@
 
 use crate::entry::Entry;
 use crate::err::Error;
-use crate::merge::MergeExt;
-use crate::merge::RawIterWrapper;
 use bplustree::BPlusTree;
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
@@ -28,8 +26,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// A snapshot serializable isolated database transaction
-pub struct Tx<K, V>
+/// A serializable snapshot isolated database transaction
+pub struct Transaction<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
@@ -48,14 +46,17 @@ where
 	datastore: Arc<BPlusTree<K, Vec<Entry<V>>>>,
 }
 
-impl<K, V> Tx<K, V>
+impl<K, V> Transaction<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Create a new read-only transaction
-	pub(crate) fn read(sn: Arc<AtomicU64>, db: Arc<BPlusTree<K, Vec<Entry<V>>>>) -> Tx<K, V> {
-		Tx {
+	pub(crate) fn read(
+		sn: Arc<AtomicU64>,
+		db: Arc<BPlusTree<K, Vec<Entry<V>>>>,
+	) -> Transaction<K, V> {
+		Transaction {
 			done: false,
 			write: false,
 			version: sn.load(Ordering::SeqCst),
@@ -65,8 +66,11 @@ where
 		}
 	}
 	/// Create a new writeable transaction
-	pub(crate) fn write(sn: Arc<AtomicU64>, db: Arc<BPlusTree<K, Vec<Entry<V>>>>) -> Tx<K, V> {
-		Tx {
+	pub(crate) fn write(
+		sn: Arc<AtomicU64>,
+		db: Arc<BPlusTree<K, Vec<Entry<V>>>>,
+	) -> Transaction<K, V> {
+		Transaction {
 			done: false,
 			write: true,
 			version: sn.load(Ordering::SeqCst),
@@ -151,7 +155,10 @@ where
 		Ok(())
 	}
 	/// Check if a key exists in the database
-	pub fn exi<T: Borrow<K>>(&self, key: T) -> Result<bool, Error> {
+	pub fn exists<Q>(&self, key: Q) -> Result<bool, Error>
+	where
+		Q: Borrow<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -181,7 +188,10 @@ where
 		Ok(res)
 	}
 	/// Fetch a key from the database
-	pub fn get<T: Borrow<K>>(&self, key: T) -> Result<Option<V>, Error> {
+	pub fn get<Q>(&self, key: Q) -> Result<Option<V>, Error>
+	where
+		Q: Borrow<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -217,7 +227,10 @@ where
 		Ok(res)
 	}
 	/// Insert or update a key in the database
-	pub fn set(&mut self, key: K, val: V) -> Result<(), Error> {
+	pub fn set<Q>(&mut self, key: Q, val: V) -> Result<(), Error>
+	where
+		Q: Into<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -227,12 +240,15 @@ where
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		self.updates.insert(key, Some(val));
+		self.updates.insert(key.into(), Some(val));
 		// Return result
 		Ok(())
 	}
 	/// Insert a key if it doesn't exist in the database
-	pub fn put(&mut self, key: K, val: V) -> Result<(), Error> {
+	pub fn put<Q>(&mut self, key: Q, val: V) -> Result<(), Error>
+	where
+		Q: Borrow<K> + Into<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -242,15 +258,18 @@ where
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.exi(&key)? {
-			false => self.updates.insert(key, Some(val)),
+		match self.exists(key.borrow())? {
+			false => self.updates.insert(key.into(), Some(val)),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
 		// Return result
 		Ok(())
 	}
 	/// Insert a key if it matches a value
-	pub fn putc(&mut self, key: K, val: V, chk: Option<V>) -> Result<(), Error> {
+	pub fn putc<Q>(&mut self, key: Q, val: V, chk: Option<V>) -> Result<(), Error>
+	where
+		Q: Borrow<K> + Into<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -260,16 +279,19 @@ where
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match (self.get(&key)?, &chk) {
-			(Some(v), Some(w)) if v == *w => self.updates.insert(key, Some(val)),
-			(None, None) => self.updates.insert(key, Some(val)),
+		match (self.get(key.borrow())?, &chk) {
+			(Some(v), Some(w)) if v == *w => self.updates.insert(key.into(), Some(val)),
+			(None, None) => self.updates.insert(key.into(), Some(val)),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
 		Ok(())
 	}
 	/// Delete a key from the database
-	pub fn del(&mut self, key: K) -> Result<(), Error> {
+	pub fn del<Q>(&mut self, key: Q) -> Result<(), Error>
+	where
+		Q: Into<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -279,12 +301,15 @@ where
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		self.updates.insert(key, None);
+		self.updates.insert(key.into(), None);
 		// Return result
 		Ok(())
 	}
 	/// Delete a key if it matches a value
-	pub fn delc(&mut self, key: K, chk: Option<V>) -> Result<(), Error> {
+	pub fn delc<Q>(&mut self, key: Q, chk: Option<V>) -> Result<(), Error>
+	where
+		Q: Borrow<K> + Into<K>,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -294,32 +319,88 @@ where
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		match (self.get(&key)?, &chk) {
-			(Some(v), Some(w)) if v == *w => self.updates.insert(key, None),
-			(None, None) => self.updates.insert(key, None),
+		match (self.get(key.borrow())?, &chk) {
+			(Some(v), Some(w)) if v == *w => self.updates.insert(key.into(), None),
+			(None, None) => self.updates.insert(key.into(), None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
 		Ok(())
 	}
-	/*/// Retrieve a range of keys from the databases
+	/// Retrieve a range of keys from the databases
 	pub fn scan(&self, rng: Range<K>, limit: usize) -> Result<Vec<(K, V)>, Error> {
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Get a mutable iterator over the tree
+		// Prepare result vector
+		let mut res = Vec::with_capacity(limit);
+		// Get raw iterators
 		let mut tree_iter = self.datastore.raw_iter();
-		let mut tree_iter = RawIterWrapper::new(self.version, &mut tree_iter);
-		//
-		let mut local_iter =
-			self.updates.iter().filter(|(k, v)| v.is_some()).map(|(k, v)| (k, v.as_ref().unwrap()));
-		//
-		let mut iter = tree_iter.merge(local_iter);
-
-		// Scan the keys
-		let res = todo!();
+		let mut self_iter = self.updates.iter();
+		// Seek to the start of the scan range
+		tree_iter.seek(&rng.start);
+		// Get the first items manually
+		let mut tree_next = tree_iter.next();
+		let mut self_next = self_iter.next();
+		// Merge results until limit is reached
+		while res.len() < limit {
+			match (tree_next, self_next) {
+				// Both iterators have items, we need to compare
+				(Some((tk, tv)), Some((sk, sv))) if tk <= &rng.end && sk <= &rng.end => {
+					if tk <= sk {
+						// Add this entry if it is not a delete
+						if let Some(v) = tv
+							// Iterate through the entry versions
+							.iter()
+							// Reverse iterate through the versions
+							.rev()
+							// Get the version prior to this transaction
+							.find(|v| v.version <= self.version)
+							// Clone the entry prior to this transaction
+							.and_then(|v| v.value.clone())
+						{
+							res.push((tk.clone(), v));
+						}
+						tree_next = tree_iter.next();
+					} else {
+						// Add this entry if it is not a delete
+						if let Some(v) = sv.clone() {
+							res.push((sk.clone(), v));
+						}
+						self_next = self_iter.next();
+					}
+				}
+				// Only the left iterator has any items
+				(Some((tk, tv)), _) if tk <= &rng.end => {
+					// Add this entry if it is not a delete
+					if let Some(v) = tv
+						// Iterate through the entry versions
+						.iter()
+						// Reverse iterate through the versions
+						.rev()
+						// Get the version prior to this transaction
+						.find(|v| v.version <= self.version)
+						// Clone the entry prior to this transaction
+						.and_then(|v| v.value.clone())
+					{
+						res.push((tk.clone(), v));
+					}
+					tree_next = tree_iter.next();
+				}
+				// Only the right iterator has any items
+				(_, Some((sk, sv))) if sk <= &rng.end => {
+					// Add this entry if it is not a delete
+					if let Some(v) = sv.clone() {
+						res.push((sk.clone(), v));
+					}
+					self_next = self_iter.next();
+				}
+				// Both iterators are exhausted
+				(_, _) => break,
+			}
+		}
 		// Return result
 		Ok(res)
-	}*/
+	}
 }
