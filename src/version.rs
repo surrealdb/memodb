@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This module stores the MVCC version logic.
+
 #[derive(Clone)]
-pub struct Entry<V>
+pub struct Version<V>
 where
 	V: Eq + Clone + Sync + Send + 'static,
 {

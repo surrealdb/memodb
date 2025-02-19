@@ -14,24 +14,27 @@
 
 //! This module stores the core in-memory database type.
 
-use crate::entry::Entry;
-use crate::err::Error;
+use crate::semaphore::Semaphore;
 use crate::tx::Transaction;
+use crate::version::Version;
 use bplustree::BPlusTree;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 /// A transactional in-memory database
+#[derive(Clone)]
 pub struct Database<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
+	/// The datastore transaction commit lock
+	pub(crate) semaphore: Arc<Semaphore>,
 	/// The current datastore sequence number
 	pub(crate) sequence: Arc<AtomicU64>,
-	/// The underlying B+tree
-	pub(crate) datastore: Arc<BPlusTree<K, Vec<Entry<V>>>>,
+	/// The underlying lock-free B+tree datastructure
+	pub(crate) datastore: Arc<BPlusTree<K, Vec<Version<V>>>>,
 }
 
 /// Create a new transactional in-memory database
@@ -41,6 +44,7 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	Database {
+		semaphore: Arc::new(Semaphore::new(1)),
 		sequence: Arc::new(AtomicU64::new(0)),
 		datastore: Arc::new(BPlusTree::new()),
 	}
@@ -52,10 +56,10 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Start a new read-only or writeable transaction
-	pub fn begin(&self, write: bool) -> Result<Transaction<K, V>, Error> {
+	pub fn begin(&self, write: bool) -> Transaction<K, V> {
 		match write {
-			true => Ok(Transaction::write(self.sequence.clone(), self.datastore.clone())),
-			false => Ok(Transaction::read(self.sequence.clone(), self.datastore.clone())),
+			true => Transaction::write(self.clone()),
+			false => Transaction::read(self.clone()),
 		}
 	}
 }
@@ -69,21 +73,19 @@ mod tests {
 	#[test]
 	fn begin_tx_readable() {
 		let db: Database<Key, Val> = new();
-		let tx = db.begin(false);
-		assert!(tx.is_ok());
+		db.begin(false);
 	}
 
 	#[test]
 	fn begin_tx_writeable() {
 		let db: Database<Key, Val> = new();
-		let tx = db.begin(true);
-		assert!(tx.is_ok());
+		db.begin(true);
 	}
 
 	#[tokio::test]
 	async fn writeable_tx_async() {
 		let db: Database<&str, &str> = new();
-		let mut tx = db.begin(true).unwrap();
+		let mut tx = db.begin(true);
 		let res = async { tx.put("test", "something") }.await;
 		assert!(res.is_ok());
 		let res = async { tx.get("test") }.await;
@@ -96,7 +98,7 @@ mod tests {
 	fn readable_tx_not_writable() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(false).unwrap();
+		let mut tx = db.begin(false);
 		let res = tx.put("test", "something");
 		assert!(res.is_err());
 		let res = tx.set("test", "something");
@@ -113,7 +115,7 @@ mod tests {
 	fn finished_tx_not_writeable() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(false).unwrap();
+		let mut tx = db.begin(false);
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		let res = tx.put("test", "something");
@@ -132,7 +134,7 @@ mod tests {
 	fn cancelled_tx_is_cancelled() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).unwrap();
+		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert_eq!(res, true);
@@ -141,7 +143,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false).unwrap();
+		let mut tx = db.begin(false);
 		let res = tx.exists("test").unwrap();
 		assert_eq!(res, false);
 		let res = tx.get("test").unwrap();
@@ -154,7 +156,7 @@ mod tests {
 	fn committed_tx_is_committed() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).unwrap();
+		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert_eq!(res, true);
@@ -163,7 +165,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false).unwrap();
+		let mut tx = db.begin(false);
 		let res = tx.exists("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx.get("test").unwrap();
@@ -176,7 +178,7 @@ mod tests {
 	fn multiple_concurrent_readers() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).unwrap();
+		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert_eq!(res, true);
@@ -185,13 +187,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.begin(false).unwrap();
+		let mut tx1 = db.begin(false);
 		let res = tx1.exists("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx1.exists("temp").unwrap();
 		assert_eq!(res, false);
 		// ----------
-		let mut tx2 = db.begin(false).unwrap();
+		let mut tx2 = db.begin(false);
 		let res = tx2.exists("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx2.exists("temp").unwrap();
@@ -207,7 +209,7 @@ mod tests {
 	fn multiple_concurrent_operators() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true).unwrap();
+		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert_eq!(res, true);
@@ -216,13 +218,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.begin(false).unwrap();
+		let mut tx1 = db.begin(false);
 		let res = tx1.exists("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx1.exists("temp").unwrap();
 		assert_eq!(res, false);
 		// ----------
-		let mut txw = db.begin(true).unwrap();
+		let mut txw = db.begin(true);
 		txw.put("temp", "other").unwrap();
 		let res = txw.exists("test").unwrap();
 		assert_eq!(res, true);
@@ -231,7 +233,7 @@ mod tests {
 		let res = txw.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx2 = db.begin(false).unwrap();
+		let mut tx2 = db.begin(false);
 		let res = tx2.exists("test").unwrap();
 		assert_eq!(res, true);
 		let res = tx2.exists("temp").unwrap();

@@ -15,8 +15,9 @@
 #![allow(clippy::bool_comparison)]
 
 mod db;
-mod entry;
+mod version;
 mod err;
+mod semaphore;
 mod tx;
 
 #[cfg(test)]
