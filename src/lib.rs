@@ -15,10 +15,10 @@
 #![allow(clippy::bool_comparison)]
 
 mod db;
-mod version;
 mod err;
 mod semaphore;
 mod tx;
+mod version;
 
 #[cfg(test)]
 pub(crate) mod kv;
