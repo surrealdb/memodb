@@ -356,7 +356,7 @@ where
 						tree_next = tree_iter.next();
 					} else {
 						// Add this entry if it is not a delete
-						if let Some(_) = sv.clone() {
+						if sv.clone().is_some() {
 							res.push(sk.clone());
 						}
 						self_next = self_iter.next();
@@ -384,7 +384,7 @@ where
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= &end => {
 					// Add this entry if it is not a delete
-					if let Some(_) = sv.clone() {
+					if sv.clone().is_some() {
 						res.push(sk.clone());
 					}
 					self_next = self_iter.next();
