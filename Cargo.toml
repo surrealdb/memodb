@@ -13,8 +13,8 @@ categories = ["database-implementations", "data-structures", "embedded"]
 license = "Apache-2.0"
 
 [dependencies]
-concread = "0.5.0"
 thiserror = "1.0.58"
+bplustree = "0.1.0"
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt", "macros"] }

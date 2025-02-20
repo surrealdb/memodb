@@ -12,28 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This module stores the database error types.
+//! This module stores the MVCC version logic.
 
-use thiserror::Error;
-
-/// The errors which can be emitted from a database.
-#[derive(Error, Debug)]
-pub enum Error {
-	#[error("Can not open transaction")]
-	DbError,
-
-	#[error("Transaction is closed")]
-	TxClosed,
-
-	#[error("Transaction is not writable")]
-	TxNotWritable,
-
-	#[error("Key being inserted already exists")]
-	KeyAlreadyExists,
-
-	#[error("Value being checked was not correct")]
-	ValNotExpectedValue,
-
-	#[error("Write conflict, retry the transaction")]
-	KeyWriteConflict,
+#[derive(Clone)]
+pub struct Version<V>
+where
+	V: Eq + Clone + Sync + Send + 'static,
+{
+	/// The version of this entry
+	pub(crate) version: u64,
+	/// The value of this entry. If this is
+	/// None, then the key is deleted and if
+	/// it is Some then the key exists.
+	pub(crate) value: Option<V>,
 }
