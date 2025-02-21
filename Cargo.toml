@@ -13,8 +13,9 @@ categories = ["database-implementations", "data-structures", "embedded"]
 license = "Apache-2.0"
 
 [dependencies]
-thiserror = "1.0.58"
 bplustree = "0.1.0"
+crossbeam-skiplist = "0.1.3"
+thiserror = "1.0.58"
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt", "macros"] }
