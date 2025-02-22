@@ -521,7 +521,7 @@ where
 	}
 
 	/// Check if a key exists in the datastore only
-	pub fn exists_in_datastore<Q>(&self, key: Q) -> bool
+	fn exists_in_datastore<Q>(&self, key: Q) -> bool
 	where
 		Q: Borrow<K>,
 	{
@@ -544,7 +544,7 @@ where
 	}
 
 	/// Check if a key equals a value in the datastore only
-	pub fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>) -> bool
+	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>) -> bool
 	where
 		Q: Borrow<K>,
 	{
