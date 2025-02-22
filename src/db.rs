@@ -14,10 +14,11 @@
 
 //! This module stores the core in-memory database type.
 
-use crate::semaphore::Semaphore;
+use crate::commit::Commit;
 use crate::tx::Transaction;
 use crate::version::Version;
 use bplustree::BPlusTree;
+use crossbeam_skiplist::SkipMap;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -29,12 +30,16 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// The datastore transaction commit lock
-	pub(crate) semaphore: Arc<Semaphore>,
 	/// The current datastore sequence number
 	pub(crate) sequence: Arc<AtomicU64>,
 	/// The underlying lock-free B+tree datastructure
 	pub(crate) datastore: Arc<BPlusTree<K, Vec<Version<V>>>>,
+	/// A list of total transactions ordered by sequence number
+	pub(crate) transactions: Arc<SkipMap<u64, AtomicU64>>,
+	/// The transaction commit queue sequence number
+	pub(crate) transaction_queue_id: Arc<AtomicU64>,
+	/// The transaction commit queue list of modifications
+	pub(crate) transaction_commit_queue: Arc<SkipMap<u64, Commit<K>>>,
 }
 
 /// Create a new transactional in-memory database
@@ -44,9 +49,11 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	Database {
-		semaphore: Arc::new(Semaphore::new(1)),
 		sequence: Arc::new(AtomicU64::new(0)),
 		datastore: Arc::new(BPlusTree::new()),
+		transactions: Arc::new(SkipMap::new()),
+		transaction_queue_id: Arc::new(AtomicU64::new(0)),
+		transaction_commit_queue: Arc::new(SkipMap::new()),
 	}
 }
 

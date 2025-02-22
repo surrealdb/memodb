@@ -29,5 +29,6 @@
 - Multi-version concurrency control
 - Rich transaction support with rollbacks
 - Multiple concurrent readers without locking
-- Support for serializable, isolated transactions
+- Multiple concurrent writers without locking
+- Support for serializable, snapshot isolated transactions
 - Atomicity, Consistency and Isolation from ACID

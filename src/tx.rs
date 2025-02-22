@@ -14,6 +14,7 @@
 
 //! This module stores the database transaction logic.
 
+use crate::commit::Commit;
 use crate::err::Error;
 use crate::version::Version;
 use crate::Database;
@@ -22,7 +23,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::mem::take;
 use std::ops::Range;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A serializable snapshot isolated database transaction
 pub struct Transaction<K, V>
@@ -42,6 +43,20 @@ where
 	database: Database<K, V>,
 }
 
+impl<K, V> Drop for Transaction<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	fn drop(&mut self) {
+		// Fetch the transaction counter
+		if let Some(count) = self.database.transactions.get(&self.version) {
+			// Decrement the transaction counter
+			count.value().fetch_sub(1, Ordering::SeqCst);
+		}
+	}
+}
+
 impl<K, V> Transaction<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
@@ -49,10 +64,19 @@ where
 {
 	/// Create a new read-only transaction
 	pub(crate) fn read(db: Database<K, V>) -> Transaction<K, V> {
+		// Get the current version sequence number
+		let version = db.sequence.load(Ordering::SeqCst);
+		// Initialise the transaction counter
+		let count = db.transactions.get_or_insert_with(version, || AtomicU64::new(0));
+		// Increment the transaction counter
+		count.value().fetch_add(1, Ordering::SeqCst);
+		// Drop the counter borrow
+		std::mem::drop(count);
+		// Create the read only transaction
 		Transaction {
 			done: false,
 			write: false,
-			version: db.sequence.load(Ordering::SeqCst),
+			version,
 			updates: BTreeMap::new(),
 			database: db,
 		}
@@ -60,13 +84,27 @@ where
 
 	/// Create a new writeable transaction
 	pub(crate) fn write(db: Database<K, V>) -> Transaction<K, V> {
+		// Get the current version sequence number
+		let version = db.sequence.load(Ordering::SeqCst);
+		// Initialise the transaction counter
+		let count = db.transactions.get_or_insert_with(version, || AtomicU64::new(0));
+		// Increment the transaction counter
+		count.value().fetch_add(1, Ordering::SeqCst);
+		// Drop the counter borrow
+		std::mem::drop(count);
+		// Create the writeable transaction
 		Transaction {
 			done: false,
 			write: true,
-			version: db.sequence.load(Ordering::SeqCst),
+			version,
 			updates: BTreeMap::new(),
 			database: db,
 		}
+	}
+
+	/// Get the starting sequence number of this transaction
+	pub fn version(&self) -> u64 {
+		self.version
 	}
 
 	/// Check if the transaction is closed
@@ -100,25 +138,25 @@ where
 		}
 		// Mark this transaction as done
 		self.done = true;
-		// Acquire the release lock
-		self.database.semaphore.acquire();
-		// Commit the data
-		for key in self.updates.keys() {
-			// Check if the key has been modified
-			let conflict = self
-				.database
-				.datastore
-				// Lookup this key from the writeset
-				.lookup(key, |v| {
-					// Get the last entry for this key
-					v.last()
-						// Check if the version is more recent
-						.is_some_and(|v| v.version > self.version)
-				})
-				// Check if there is a more recent entry
-				.is_some_and(|v| v == true);
-			// This key was already modified, so error
-			if conflict {
+		// Increase the transaction commit queue number
+		let commit = self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
+		// Insert this transaction into the commit queue
+		self.database.transaction_commit_queue.insert(
+			commit,
+			Commit {
+				done: AtomicBool::new(false),
+				keyset: self.updates.keys().cloned().collect(),
+			},
+		);
+		// Fetch the entry for the current transaction
+		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
+		// Retrieve all transactions committed since we began
+		for tx in self.database.transaction_commit_queue.range(self.version..commit) {
+			// A previous transaction has conflicting modifications
+			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
+				// Remove the transaction from the commit queue
+				self.database.transaction_commit_queue.remove(&commit);
+				// Return the error for this transaction
 				return Err(Error::KeyWriteConflict);
 			}
 		}
@@ -146,8 +184,10 @@ where
 				);
 			}
 		}
-		// Release the commit lock
-		self.database.semaphore.release();
+		// Fetch the transaction entry in the commit queue
+		let txn = self.database.transaction_commit_queue.get(&commit).unwrap();
+		// Mark the transaction as done
+		txn.value().done.store(true, Ordering::SeqCst);
 		// Continue
 		Ok(())
 	}
@@ -481,7 +521,7 @@ where
 	}
 
 	/// Check if a key exists in the datastore only
-	pub fn exists_in_datastore<Q>(&self, key: Q) -> bool
+	fn exists_in_datastore<Q>(&self, key: Q) -> bool
 	where
 		Q: Borrow<K>,
 	{
@@ -504,7 +544,7 @@ where
 	}
 
 	/// Check if a key equals a value in the datastore only
-	pub fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>) -> bool
+	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>) -> bool
 	where
 		Q: Borrow<K>,
 	{

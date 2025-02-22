@@ -14,9 +14,9 @@
 
 #![allow(clippy::bool_comparison)]
 
+mod commit;
 mod db;
 mod err;
-mod semaphore;
 mod tx;
 mod version;
 
