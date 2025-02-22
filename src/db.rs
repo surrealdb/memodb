@@ -254,4 +254,212 @@ mod tests {
 		let res = tx2.cancel();
 		assert!(res.is_ok());
 	}
+
+	#[test]
+	fn iterate_keys_forward() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx = db.begin(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.keys("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "c");
+		assert_eq!(res[1], "d");
+		assert_eq!(res[2], "e");
+		assert_eq!(res[3], "f");
+		assert_eq!(res[4], "g");
+		assert_eq!(res[5], "h");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "j");
+		assert_eq!(res[8], "k");
+		assert_eq!(res[9], "l");
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.begin(false);
+		let res = tx.keys("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "c");
+		assert_eq!(res[1], "d");
+		assert_eq!(res[2], "e");
+		assert_eq!(res[3], "f");
+		assert_eq!(res[4], "g");
+		assert_eq!(res[5], "h");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "j");
+		assert_eq!(res[8], "k");
+		assert_eq!(res[9], "l");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_reverse() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx = db.begin(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.keys_reverse("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "o");
+		assert_eq!(res[1], "n");
+		assert_eq!(res[2], "m");
+		assert_eq!(res[3], "l");
+		assert_eq!(res[4], "k");
+		assert_eq!(res[5], "j");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "h");
+		assert_eq!(res[8], "g");
+		assert_eq!(res[9], "f");
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.begin(false);
+		let res = tx.keys_reverse("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "o");
+		assert_eq!(res[1], "n");
+		assert_eq!(res[2], "m");
+		assert_eq!(res[3], "l");
+		assert_eq!(res[4], "k");
+		assert_eq!(res[5], "j");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "h");
+		assert_eq!(res[8], "g");
+		assert_eq!(res[9], "f");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_values_forward() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx = db.begin(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.scan("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], ("c", "c"));
+		assert_eq!(res[1], ("d", "d"));
+		assert_eq!(res[2], ("e", "e"));
+		assert_eq!(res[3], ("f", "f"));
+		assert_eq!(res[4], ("g", "g"));
+		assert_eq!(res[5], ("h", "h"));
+		assert_eq!(res[6], ("i", "i"));
+		assert_eq!(res[7], ("j", "j"));
+		assert_eq!(res[8], ("k", "k"));
+		assert_eq!(res[9], ("l", "l"));
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.begin(false);
+		let res = tx.scan("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], ("c", "c"));
+		assert_eq!(res[1], ("d", "d"));
+		assert_eq!(res[2], ("e", "e"));
+		assert_eq!(res[3], ("f", "f"));
+		assert_eq!(res[4], ("g", "g"));
+		assert_eq!(res[5], ("h", "h"));
+		assert_eq!(res[6], ("i", "i"));
+		assert_eq!(res[7], ("j", "j"));
+		assert_eq!(res[8], ("k", "k"));
+		assert_eq!(res[9], ("l", "l"));
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_values_reverse() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx = db.begin(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.scan_reverse("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], ("o", "o"));
+		assert_eq!(res[1], ("n", "n"));
+		assert_eq!(res[2], ("m", "m"));
+		assert_eq!(res[3], ("l", "l"));
+		assert_eq!(res[4], ("k", "k"));
+		assert_eq!(res[5], ("j", "j"));
+		assert_eq!(res[6], ("i", "i"));
+		assert_eq!(res[7], ("h", "h"));
+		assert_eq!(res[8], ("g", "g"));
+		assert_eq!(res[9], ("f", "f"));
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.begin(false);
+		let res = tx.scan_reverse("c".."z", 10).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], ("o", "o"));
+		assert_eq!(res[1], ("n", "n"));
+		assert_eq!(res[2], ("m", "m"));
+		assert_eq!(res[3], ("l", "l"));
+		assert_eq!(res[4], ("k", "k"));
+		assert_eq!(res[5], ("j", "j"));
+		assert_eq!(res[6], ("i", "i"));
+		assert_eq!(res[7], ("h", "h"));
+		assert_eq!(res[8], ("g", "g"));
+		assert_eq!(res[9], ("f", "f"));
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
 }
