@@ -264,7 +264,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.keys("c".."z", 10).unwrap();
+		let res = tx.keys("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
 		assert_eq!(res[1], "d");
@@ -280,7 +280,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.keys("c".."z", 10).unwrap();
+		let res = tx.keys("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
 		assert_eq!(res[1], "d");
@@ -316,7 +316,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.keys_reverse("c".."z", 10).unwrap();
+		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
 		assert_eq!(res[1], "n");
@@ -332,7 +332,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.keys_reverse("c".."z", 10).unwrap();
+		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
 		assert_eq!(res[1], "n");
@@ -368,7 +368,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.scan("c".."z", 10).unwrap();
+		let res = tx.scan("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
 		assert_eq!(res[1], ("d", "d"));
@@ -384,7 +384,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.scan("c".."z", 10).unwrap();
+		let res = tx.scan("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
 		assert_eq!(res[1], ("d", "d"));
@@ -420,7 +420,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.scan_reverse("c".."z", 10).unwrap();
+		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
 		assert_eq!(res[1], ("n", "n"));
@@ -436,7 +436,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.scan_reverse("c".."z", 10).unwrap();
+		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
 		assert_eq!(res[1], ("n", "n"));

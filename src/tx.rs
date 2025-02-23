@@ -352,7 +352,7 @@ where
 	}
 
 	/// Retrieve a range of keys from the databases
-	pub fn keys<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<K>, Error>
+	pub fn keys<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -362,8 +362,8 @@ where
 		}
 		// Prepare result vector
 		let mut res = match limit {
-			usize::MAX => Vec::new(),
-			_ => Vec::with_capacity(limit),
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
 		};
 		// Compute the range
 		let beg = rng.start.borrow();
@@ -377,7 +377,7 @@ where
 		let mut tree_next = tree_iter.next();
 		let mut self_next = self_iter.next();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
@@ -442,7 +442,7 @@ where
 	}
 
 	/// Retrieve a range of keys from the databases
-	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<K>, Error>
+	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -452,8 +452,8 @@ where
 		}
 		// Prepare result vector
 		let mut res = match limit {
-			usize::MAX => Vec::new(),
-			_ => Vec::with_capacity(limit),
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
 		};
 		// Compute the range
 		let beg = rng.start.borrow();
@@ -467,7 +467,7 @@ where
 		let mut tree_next = tree_iter.prev();
 		let mut self_next = self_iter.next_back();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
@@ -532,7 +532,7 @@ where
 	}
 
 	/// Retrieve a range of keys and values from the databases
-	pub fn scan<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<(K, V)>, Error>
+	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -542,8 +542,8 @@ where
 		}
 		// Prepare result vector
 		let mut res = match limit {
-			usize::MAX => Vec::new(),
-			_ => Vec::with_capacity(limit),
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
 		};
 		// Compute the range
 		let beg = rng.start.borrow();
@@ -557,7 +557,7 @@ where
 		let mut tree_next = tree_iter.next();
 		let mut self_next = self_iter.next();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
@@ -618,7 +618,7 @@ where
 	}
 
 	/// Retrieve a range of keys and values from the databases in reverse order
-	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<(K, V)>, Error>
+	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -628,8 +628,8 @@ where
 		}
 		// Prepare result vector
 		let mut res = match limit {
-			usize::MAX => Vec::new(),
-			_ => Vec::with_capacity(limit),
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
 		};
 		// Compute the range
 		let beg = rng.start.borrow();
@@ -643,7 +643,7 @@ where
 		let mut tree_next = tree_iter.prev();
 		let mut self_next = self_iter.next_back();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
