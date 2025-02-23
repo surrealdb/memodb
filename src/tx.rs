@@ -18,6 +18,7 @@ use crate::commit::Commit;
 use crate::err::Error;
 use crate::version::Version;
 use crate::Database;
+use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -174,13 +175,13 @@ where
 					value,
 				});
 			} else {
-				// Otherwise insert an entry into the tree
+				// Otherwise insert a new entry into the tree
 				iter.insert(
 					key,
-					vec![Version {
+					SortedVec::from(vec![Version {
 						version,
 						value,
-					}],
+					}]),
 				);
 			}
 		}

@@ -19,6 +19,7 @@ use crate::tx::Transaction;
 use crate::version::Version;
 use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
+use sorted_vec::SortedVec;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ where
 	/// The current datastore sequence number
 	pub(crate) sequence: Arc<AtomicU64>,
 	/// The underlying lock-free B+tree datastructure
-	pub(crate) datastore: Arc<BPlusTree<K, Vec<Version<V>>>>,
+	pub(crate) datastore: Arc<BPlusTree<K, SortedVec<Version<V>>>>,
 	/// A list of total transactions ordered by sequence number
 	pub(crate) transactions: Arc<SkipMap<u64, AtomicU64>>,
 	/// The transaction commit queue sequence number

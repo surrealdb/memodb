@@ -14,7 +14,9 @@
 
 //! This module stores a MVCC versioned entry.
 
-#[derive(Clone)]
+use std::cmp::Ordering;
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct Version<V>
 where
 	V: Eq + Clone + Sync + Send + 'static,
@@ -25,4 +27,22 @@ where
 	/// None, then the key is deleted and if
 	/// it is Some then the key exists.
 	pub(crate) value: Option<V>,
+}
+
+impl<V> Ord for Version<V>
+where
+	V: Eq + Clone + Sync + Send + 'static,
+{
+	fn cmp(&self, other: &Self) -> Ordering {
+		self.version.cmp(&other.version)
+	}
+}
+
+impl<V> PartialOrd for Version<V>
+where
+	V: Eq + Clone + Sync + Send + 'static,
+{
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.version.cmp(&other.version))
+	}
 }
