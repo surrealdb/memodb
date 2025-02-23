@@ -353,22 +353,25 @@ where
 	/// Retrieve a range of keys from the databases
 	pub fn keys<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<K>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			usize::MAX => Vec::new(),
+			_ => Vec::with_capacity(limit),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek(&beg);
+		tree_iter.seek(beg);
 		// Get the first items manually
 		let mut tree_next = tree_iter.next();
 		let mut self_next = self_iter.next();
@@ -376,7 +379,7 @@ where
 		while res.len() < limit {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk {
 						// Add this entry if it is not a delete
 						if tv
@@ -385,7 +388,7 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version && v.value.is_some())
+							.find(|v| v.version <= self.version)
 							// Check if there is a version prior to this transaction
 							.is_some_and(|v| {
 								// Check if the found entry is a deleted version
@@ -403,7 +406,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if tv
 						// Iterate through the entry versions
@@ -422,7 +425,7 @@ where
 					tree_next = tree_iter.next();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if sv.clone().is_some() {
 						res.push(sk.clone());
@@ -430,7 +433,7 @@ where
 					self_next = self_iter.next();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -440,22 +443,25 @@ where
 	/// Retrieve a range of keys from the databases
 	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<K>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			usize::MAX => Vec::new(),
+			_ => Vec::with_capacity(limit),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(&end);
+		tree_iter.seek_for_prev(end);
 		// Get the first items manually
 		let mut tree_next = tree_iter.prev();
 		let mut self_next = self_iter.next_back();
@@ -463,7 +469,7 @@ where
 		while res.len() < limit {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk {
 						// Add this entry if it is not a delete
 						if tv
@@ -472,7 +478,7 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version && v.value.is_some())
+							.find(|v| v.version <= self.version)
 							// Check if there is a version prior to this transaction
 							.is_some_and(|v| {
 								// Check if the found entry is a deleted version
@@ -490,7 +496,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if tv
 						// Iterate through the entry versions
@@ -509,7 +515,7 @@ where
 					tree_next = tree_iter.prev();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if sv.clone().is_some() {
 						res.push(sk.clone());
@@ -517,7 +523,7 @@ where
 					self_next = self_iter.next_back();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -527,22 +533,25 @@ where
 	/// Retrieve a range of keys and values from the databases
 	pub fn scan<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<(K, V)>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			usize::MAX => Vec::new(),
+			_ => Vec::with_capacity(limit),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek(&beg);
+		tree_iter.seek(beg);
 		// Get the first items manually
 		let mut tree_next = tree_iter.next();
 		let mut self_next = self_iter.next();
@@ -550,7 +559,7 @@ where
 		while res.len() < limit {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv
@@ -575,7 +584,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = tv
 						// Iterate through the entry versions
@@ -592,7 +601,7 @@ where
 					tree_next = tree_iter.next();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = sv.clone() {
 						res.push((sk.clone(), v));
@@ -600,7 +609,7 @@ where
 					self_next = self_iter.next();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -610,22 +619,25 @@ where
 	/// Retrieve a range of keys and values from the databases in reverse order
 	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<(K, V)>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			usize::MAX => Vec::new(),
+			_ => Vec::with_capacity(limit),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(&end);
+		tree_iter.seek_for_prev(end);
 		// Get the first items manually
 		let mut tree_next = tree_iter.prev();
 		let mut self_next = self_iter.next_back();
@@ -633,7 +645,7 @@ where
 		while res.len() < limit {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv
@@ -658,7 +670,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = tv
 						// Iterate through the entry versions
@@ -675,7 +687,7 @@ where
 					tree_next = tree_iter.prev();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = sv.clone() {
 						res.push((sk.clone(), v));
@@ -683,7 +695,7 @@ where
 					self_next = self_iter.next_back();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
