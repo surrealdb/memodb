@@ -17,6 +17,3 @@ bplustree = "0.1.0"
 crossbeam-skiplist = "0.1.3"
 sorted-vec = "0.8.6"
 thiserror = "1.0.58"
-
-[dev-dependencies]
-tokio = { version = "1.37.0", features = ["rt", "macros"] }

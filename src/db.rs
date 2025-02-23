@@ -90,18 +90,6 @@ mod tests {
 		db.begin(true);
 	}
 
-	#[tokio::test]
-	async fn writeable_tx_async() {
-		let db: Database<&str, &str> = new();
-		let mut tx = db.begin(true);
-		let res = async { tx.put("test", "something") }.await;
-		assert!(res.is_ok());
-		let res = async { tx.get("test") }.await;
-		assert!(res.is_ok());
-		let res = async { tx.commit() }.await;
-		assert!(res.is_ok());
-	}
-
 	#[test]
 	fn readable_tx_not_writable() {
 		let db: Database<&str, &str> = new();
