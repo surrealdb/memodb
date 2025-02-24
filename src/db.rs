@@ -133,7 +133,7 @@ mod tests {
 		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx.get("test").unwrap();
 		assert_eq!(res, Some("something"));
 		let res = tx.cancel();
@@ -141,7 +141,7 @@ mod tests {
 		// ----------
 		let mut tx = db.begin(false);
 		let res = tx.exists("test").unwrap();
-		assert_eq!(res, false);
+		assert!(!res);
 		let res = tx.get("test").unwrap();
 		assert_eq!(res, None);
 		let res = tx.cancel();
@@ -155,7 +155,7 @@ mod tests {
 		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx.get("test").unwrap();
 		assert_eq!(res, Some("something"));
 		let res = tx.commit();
@@ -163,7 +163,7 @@ mod tests {
 		// ----------
 		let mut tx = db.begin(false);
 		let res = tx.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx.get("test").unwrap();
 		assert_eq!(res, Some("something"));
 		let res = tx.cancel();
@@ -177,7 +177,7 @@ mod tests {
 		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx.get("test").unwrap();
 		assert_eq!(res, Some("something"));
 		let res = tx.commit();
@@ -185,15 +185,15 @@ mod tests {
 		// ----------
 		let mut tx1 = db.begin(false);
 		let res = tx1.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx1.exists("temp").unwrap();
-		assert_eq!(res, false);
+		assert!(!res);
 		// ----------
 		let mut tx2 = db.begin(false);
 		let res = tx2.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx2.exists("temp").unwrap();
-		assert_eq!(res, false);
+		assert!(!res);
 		// ----------
 		let res = tx1.cancel();
 		assert!(res.is_ok());
@@ -208,7 +208,7 @@ mod tests {
 		let mut tx = db.begin(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx.get("test").unwrap();
 		assert_eq!(res, Some("something"));
 		let res = tx.commit();
@@ -216,27 +216,27 @@ mod tests {
 		// ----------
 		let mut tx1 = db.begin(false);
 		let res = tx1.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx1.exists("temp").unwrap();
-		assert_eq!(res, false);
+		assert!(!res);
 		// ----------
 		let mut txw = db.begin(true);
 		txw.put("temp", "other").unwrap();
 		let res = txw.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = txw.exists("temp").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = txw.commit();
 		assert!(res.is_ok());
 		// ----------
 		let mut tx2 = db.begin(false);
 		let res = tx2.exists("test").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		let res = tx2.exists("temp").unwrap();
-		assert_eq!(res, true);
+		assert!(res);
 		// ----------
 		let res = tx1.exists("temp").unwrap();
-		assert_eq!(res, false);
+		assert!(!res);
 		// ----------
 		let res = tx1.cancel();
 		assert!(res.is_ok());
