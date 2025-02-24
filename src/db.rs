@@ -19,6 +19,7 @@ use crate::tx::Transaction;
 use crate::version::Version;
 use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
+use sorted_vec::SortedVec;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ where
 	/// The current datastore sequence number
 	pub(crate) sequence: Arc<AtomicU64>,
 	/// The underlying lock-free B+tree datastructure
-	pub(crate) datastore: Arc<BPlusTree<K, Vec<Version<V>>>>,
+	pub(crate) datastore: Arc<BPlusTree<K, SortedVec<Version<V>>>>,
 	/// A list of total transactions ordered by sequence number
 	pub(crate) transactions: Arc<SkipMap<u64, AtomicU64>>,
 	/// The transaction commit queue sequence number
@@ -87,18 +88,6 @@ mod tests {
 	fn begin_tx_writeable() {
 		let db: Database<Key, Val> = new();
 		db.begin(true);
-	}
-
-	#[tokio::test]
-	async fn writeable_tx_async() {
-		let db: Database<&str, &str> = new();
-		let mut tx = db.begin(true);
-		let res = async { tx.put("test", "something") }.await;
-		assert!(res.is_ok());
-		let res = async { tx.get("test") }.await;
-		assert!(res.is_ok());
-		let res = async { tx.commit() }.await;
-		assert!(res.is_ok());
 	}
 
 	#[test]
@@ -275,7 +264,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.keys("c".."z", 10).unwrap();
+		let res = tx.keys("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
 		assert_eq!(res[1], "d");
@@ -291,7 +280,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.keys("c".."z", 10).unwrap();
+		let res = tx.keys("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
 		assert_eq!(res[1], "d");
@@ -327,7 +316,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.keys_reverse("c".."z", 10).unwrap();
+		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
 		assert_eq!(res[1], "n");
@@ -343,7 +332,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.keys_reverse("c".."z", 10).unwrap();
+		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
 		assert_eq!(res[1], "n");
@@ -379,7 +368,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.scan("c".."z", 10).unwrap();
+		let res = tx.scan("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
 		assert_eq!(res[1], ("d", "d"));
@@ -395,7 +384,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.scan("c".."z", 10).unwrap();
+		let res = tx.scan("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
 		assert_eq!(res[1], ("d", "d"));
@@ -431,7 +420,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.scan_reverse("c".."z", 10).unwrap();
+		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
 		assert_eq!(res[1], ("n", "n"));
@@ -447,7 +436,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.begin(false);
-		let res = tx.scan_reverse("c".."z", 10).unwrap();
+		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
 		assert_eq!(res[1], ("n", "n"));

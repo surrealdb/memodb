@@ -18,6 +18,7 @@ use crate::commit::Commit;
 use crate::err::Error;
 use crate::version::Version;
 use crate::Database;
+use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -36,6 +37,8 @@ where
 	/// Is the transaction writeable?
 	write: bool,
 	/// The version at which this transaction started
+	commit: u64,
+	/// The version at which this transaction started
 	version: u64,
 	/// The local set of updates and deletes
 	updates: BTreeMap<K, Option<V>>,
@@ -49,10 +52,22 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	fn drop(&mut self) {
-		// Fetch the transaction counter
-		if let Some(count) = self.database.transactions.get(&self.version) {
-			// Decrement the transaction counter
-			count.value().fetch_sub(1, Ordering::SeqCst);
+		// Fetch the transaction counter for this snapshot version
+		if let Some(entry) = self.database.transactions.get(&self.version) {
+			// Decrement the transaction counter for this snapshot version
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			// Check if we can clear up the transaction counter for this snapshot version
+			if total == 0 && self.database.sequence.load(Ordering::SeqCst) > self.version {
+				// Check if there are previous transactions
+				if entry.prev().is_none() {
+					// Remove the entries from the commit queue up to this version
+					self.database.transaction_commit_queue.range(..=&self.version).for_each(|e| {
+						e.remove();
+					});
+				}
+				// Remove the transaction entry for this snapshot version
+				entry.remove();
+			}
 		}
 	}
 }
@@ -64,6 +79,8 @@ where
 {
 	/// Create a new read-only transaction
 	pub(crate) fn read(db: Database<K, V>) -> Transaction<K, V> {
+		// Get the current commit sequence number
+		let commit = db.transaction_queue_id.load(Ordering::SeqCst);
 		// Get the current version sequence number
 		let version = db.sequence.load(Ordering::SeqCst);
 		// Initialise the transaction counter
@@ -76,6 +93,7 @@ where
 		Transaction {
 			done: false,
 			write: false,
+			commit,
 			version,
 			updates: BTreeMap::new(),
 			database: db,
@@ -84,6 +102,8 @@ where
 
 	/// Create a new writeable transaction
 	pub(crate) fn write(db: Database<K, V>) -> Transaction<K, V> {
+		// Get the current commit sequence number
+		let commit = db.transaction_queue_id.load(Ordering::SeqCst);
 		// Get the current version sequence number
 		let version = db.sequence.load(Ordering::SeqCst);
 		// Initialise the transaction counter
@@ -96,6 +116,7 @@ where
 		Transaction {
 			done: false,
 			write: true,
+			commit,
 			version,
 			updates: BTreeMap::new(),
 			database: db,
@@ -151,7 +172,7 @@ where
 		// Fetch the entry for the current transaction
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
-		for tx in self.database.transaction_commit_queue.range(self.version..commit) {
+		for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit) {
 			// A previous transaction has conflicting modifications
 			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
 				// Remove the transaction from the commit queue
@@ -174,13 +195,13 @@ where
 					value,
 				});
 			} else {
-				// Otherwise insert an entry into the tree
+				// Otherwise insert a new entry into the tree
 				iter.insert(
 					key,
-					vec![Version {
+					SortedVec::from(vec![Version {
 						version,
 						value,
-					}],
+					}]),
 				);
 			}
 		}
@@ -351,33 +372,36 @@ where
 	}
 
 	/// Retrieve a range of keys from the databases
-	pub fn keys<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<K>, Error>
+	pub fn keys<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek(&beg);
+		tree_iter.seek(beg);
 		// Get the first items manually
 		let mut tree_next = tree_iter.next();
 		let mut self_next = self_iter.next();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
-					if tk <= sk {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if tv
 							// Iterate through the entry versions
@@ -385,7 +409,7 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version && v.value.is_some())
+							.find(|v| v.version <= self.version)
 							// Check if there is a version prior to this transaction
 							.is_some_and(|v| {
 								// Check if the found entry is a deleted version
@@ -395,6 +419,10 @@ where
 						}
 						tree_next = tree_iter.next();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.next();
+						}
 						// Add this entry if it is not a delete
 						if sv.clone().is_some() {
 							res.push(sk.clone());
@@ -403,7 +431,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if tv
 						// Iterate through the entry versions
@@ -422,7 +450,7 @@ where
 					tree_next = tree_iter.next();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if sv.clone().is_some() {
 						res.push(sk.clone());
@@ -430,7 +458,7 @@ where
 					self_next = self_iter.next();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -438,33 +466,36 @@ where
 	}
 
 	/// Retrieve a range of keys from the databases
-	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<K>, Error>
+	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(&end);
+		tree_iter.seek_for_prev(end);
 		// Get the first items manually
 		let mut tree_next = tree_iter.prev();
 		let mut self_next = self_iter.next_back();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
-					if tk <= sk {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if tv
 							// Iterate through the entry versions
@@ -472,7 +503,7 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version && v.value.is_some())
+							.find(|v| v.version <= self.version)
 							// Check if there is a version prior to this transaction
 							.is_some_and(|v| {
 								// Check if the found entry is a deleted version
@@ -482,6 +513,10 @@ where
 						}
 						tree_next = tree_iter.prev();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.prev();
+						}
 						// Add this entry if it is not a delete
 						if sv.clone().is_some() {
 							res.push(sk.clone());
@@ -490,7 +525,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if tv
 						// Iterate through the entry versions
@@ -509,7 +544,7 @@ where
 					tree_next = tree_iter.prev();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if sv.clone().is_some() {
 						res.push(sk.clone());
@@ -517,7 +552,7 @@ where
 					self_next = self_iter.next_back();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -525,33 +560,36 @@ where
 	}
 
 	/// Retrieve a range of keys and values from the databases
-	pub fn scan<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<(K, V)>, Error>
+	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek(&beg);
+		tree_iter.seek(beg);
 		// Get the first items manually
 		let mut tree_next = tree_iter.next();
 		let mut self_next = self_iter.next();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
-					if tk <= sk {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv
 							// Iterate through the entry versions
@@ -567,6 +605,10 @@ where
 						}
 						tree_next = tree_iter.next();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.next();
+						}
 						// Add this entry if it is not a delete
 						if let Some(v) = sv.clone() {
 							res.push((sk.clone(), v));
@@ -575,7 +617,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = tv
 						// Iterate through the entry versions
@@ -592,7 +634,7 @@ where
 					tree_next = tree_iter.next();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = sv.clone() {
 						res.push((sk.clone(), v));
@@ -600,7 +642,7 @@ where
 					self_next = self_iter.next();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -608,33 +650,36 @@ where
 	}
 
 	/// Retrieve a range of keys and values from the databases in reverse order
-	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: usize) -> Result<Vec<(K, V)>, Error>
+	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
 	where
-		Q: Into<K>,
+		Q: Borrow<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
-		let mut res = Vec::new();
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l),
+			None => Vec::new(),
+		};
 		// Compute the range
-		let beg = rng.start.into();
-		let end = rng.end.into();
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(&beg..&end);
+		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(&end);
+		tree_iter.seek_for_prev(end);
 		// Get the first items manually
 		let mut tree_next = tree_iter.prev();
 		let mut self_next = self_iter.next_back();
 		// Merge results until limit is reached
-		while res.len() < limit {
+		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= &end && sk <= &end => {
-					if tk <= sk {
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv
 							// Iterate through the entry versions
@@ -650,6 +695,10 @@ where
 						}
 						tree_next = tree_iter.prev();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.prev();
+						}
 						// Add this entry if it is not a delete
 						if let Some(v) = sv.clone() {
 							res.push((sk.clone(), v));
@@ -658,7 +707,7 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= &end => {
+				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = tv
 						// Iterate through the entry versions
@@ -675,7 +724,7 @@ where
 					tree_next = tree_iter.prev();
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= &end => {
+				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = sv.clone() {
 						res.push((sk.clone(), v));
@@ -683,7 +732,7 @@ where
 					self_next = self_iter.next_back();
 				}
 				// Both iterators are exhausted
-				(_, _) => break,
+				_ => break,
 			}
 		}
 		// Return result
@@ -745,143 +794,184 @@ mod tests {
 	use crate::new;
 
 	#[test]
-	fn mvcc_snapshot_isolation() {
+	fn mvcc_non_conflicting_keys_should_succeed() {
 		let db: Database<&str, &str> = new();
-
-		let key1 = "key1";
-		let key2 = "key2";
-		let value1 = "baz";
-		let value2 = "bar";
-
-		// no conflict
-		{
-			let mut txn1 = db.begin(true);
-			let mut txn2 = db.begin(true);
-
-			txn1.set(key1, value1).unwrap();
-			txn1.commit().unwrap();
-
-			assert!(txn2.get(key2).unwrap().is_none());
-			txn2.set(key2, value2).unwrap();
-			txn2.commit().unwrap();
-		}
-
-		// conflict when the read key was updated by another transaction
-		{
-			let mut txn1 = db.begin(true);
-			let mut txn2 = db.begin(true);
-
-			txn1.set(key1, value1).unwrap();
-			txn1.commit().unwrap();
-
-			assert!(txn2.get(key1).is_ok());
-			txn2.set(key1, value2).unwrap();
-			assert!(txn2.commit().is_err());
-		}
-
-		// blind writes should not succeed
-		{
-			let mut txn1 = db.begin(true);
-			let mut txn2 = db.begin(true);
-
-			txn1.set(key1, value1).unwrap();
-			txn2.set(key1, value2).unwrap();
-
-			txn1.commit().unwrap();
-			assert!(txn2.commit().is_err());
-		}
-
-		// conflict when the read key was updated by another transaction
-		{
-			let key = "key3";
-
-			let mut txn1 = db.begin(true);
-			let mut txn2 = db.begin(true);
-
-			txn1.set(key, value1).unwrap();
-			txn1.commit().unwrap();
-
-			assert!(txn2.get(key).unwrap().is_none());
-			txn2.set(key, value1).unwrap();
-			assert!(txn2.commit().is_err());
-		}
-
-		// write-skew: read conflict when the read key was deleted by another transaction
-		{
-			let key = "key4";
-
-			let mut txn1 = db.begin(true);
-			txn1.set(key, value1).unwrap();
-			txn1.commit().unwrap();
-
-			let mut txn2 = db.begin(true);
-			let mut txn3 = db.begin(true);
-
-			txn2.del(key).unwrap();
-			assert!(txn2.commit().is_ok());
-
-			assert!(txn3.get(key).is_ok());
-			txn3.set(key, value2).unwrap();
-			assert!(txn3.commit().is_ok());
-		}
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key2").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_ok());
 	}
 
 	#[test]
-	fn mvcc_snapshot_isolation_scan() {
+	fn mvcc_conflicting_blind_writes_should_error() {
 		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key1", "value2").unwrap();
+		// ----------
+		assert!(tx1.commit().is_ok());
+		assert!(tx2.commit().is_err());
+	}
 
-		let key1 = "key1";
-		let key2 = "key2";
-		let key3 = "key3";
-		let key4 = "key4";
-		let value1 = "value1";
-		let value2 = "value2";
-		let value3 = "value3";
-		let value4 = "value4";
-		let value5 = "value5";
-		let value6 = "value6";
+	#[test]
+	fn mvcc_conflicting_read_keys_should_succeed() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_ok());
+	}
 
-		// conflict when scan keys have been updated in another transaction
-		{
-			let mut txn1 = db.begin(true);
+	#[test]
+	fn mvcc_conflicting_write_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key1", "value2").unwrap();
+		assert!(tx2.commit().is_err());
+	}
 
-			txn1.set(key1, value1).unwrap();
-			txn1.commit().unwrap();
+	#[test]
+	fn mvcc_conflicting_read_deleted_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		let mut tx2 = db.begin(true);
+		let mut tx3 = db.begin(true);
+		// ----------
+		assert!(tx2.get("key").unwrap().is_some());
+		tx2.del("key").unwrap();
+		assert!(tx2.commit().is_ok());
+		// ----------
+		assert!(tx3.get("key").unwrap().is_some());
+		tx3.set("key", "value2").unwrap();
+		assert!(tx3.commit().is_err());
+	}
 
-			let mut txn2 = db.begin(true);
-			let mut txn3 = db.begin(true);
+	#[test]
+	fn mvcc_scan_conflicting_write_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		let mut tx2 = db.begin(true);
+		let mut tx3 = db.begin(true);
+		// ----------
+		tx2.set("key1", "value4").unwrap();
+		tx2.set("key2", "value2").unwrap();
+		tx2.set("key3", "value3").unwrap();
+		assert!(tx2.commit().is_ok());
+		// ----------
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 1);
+		tx3.set("key2", "value5").unwrap();
+		tx3.set("key3", "value6").unwrap();
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 3);
+		assert!(tx3.commit().is_err());
+	}
 
-			txn2.set(key1, value4).unwrap();
-			txn2.set(key2, value2).unwrap();
-			txn2.set(key3, value3).unwrap();
-			txn2.commit().unwrap();
+	#[test]
+	fn mvcc_scan_conflicting_read_deleted_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		let mut tx2 = db.begin(true);
+		let mut tx3 = db.begin(true);
+		// ----------
+		tx2.del("key1").unwrap();
+		assert!(tx2.commit().is_ok());
+		// ----------
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 1);
+		tx3.set("key1", "other").unwrap();
+		tx3.set("key2", "value2").unwrap();
+		tx3.set("key3", "value3").unwrap();
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 3);
+		assert!(tx3.commit().is_err());
+	}
 
-			let range = "key1".."key4";
-			let results = txn3.scan(range, 10).unwrap();
-			assert_eq!(results.len(), 1);
-			txn3.set(key2, value5).unwrap();
-			txn3.set(key3, value6).unwrap();
-
-			assert!(txn3.commit().is_err());
-		}
-
-		// write-skew: read conflict when read keys are deleted by other transaction
-		{
-			let mut txn1 = db.begin(true);
-
-			txn1.set(key4, value1).unwrap();
-			txn1.commit().unwrap();
-
-			let mut txn2 = db.begin(true);
-			let mut txn3 = db.begin(true);
-
-			txn2.del(key4).unwrap();
-			txn2.commit().unwrap();
-
-			let range = "key1".."key5";
-			let _ = txn3.scan(range, 10).unwrap();
-			txn3.set(key4, value2).unwrap();
-			assert!(txn3.commit().is_ok());
-		}
+	#[test]
+	fn mvcc_transaction_queue_correctness() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		std::mem::drop(tx1);
+		// ----------
+		let mut tx2 = db.begin(true);
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_ok());
+		std::mem::drop(tx2);
+		// ----------
+		let mut tx3 = db.begin(true);
+		tx3.set("key", "value").unwrap();
+		// ----------
+		let mut tx4 = db.begin(true);
+		tx4.set("key", "value").unwrap();
+		// ----------
+		assert!(tx3.commit().is_ok());
+		assert!(tx4.commit().is_err());
+		std::mem::drop(tx3);
+		std::mem::drop(tx4);
+		// ----------
+		let mut tx5 = db.begin(true);
+		tx5.set("key", "other").unwrap();
+		// ----------
+		let mut tx6 = db.begin(true);
+		tx6.set("key", "other").unwrap();
+		// ----------
+		assert!(tx5.commit().is_ok());
+		assert!(tx6.commit().is_err());
+		std::mem::drop(tx5);
+		std::mem::drop(tx6);
+		// ----------
+		let mut tx7 = db.begin(true);
+		tx7.set("key", "change").unwrap();
+		// ----------
+		let mut tx8 = db.begin(true);
+		tx8.set("key", "change").unwrap();
+		// ----------
+		assert!(tx7.commit().is_ok());
+		assert!(tx7.commit().is_err());
+		std::mem::drop(tx7);
+		std::mem::drop(tx8);
 	}
 }
