@@ -737,3 +737,151 @@ where
 			.flatten()
 	}
 }
+
+#[cfg(test)]
+mod tests {
+
+	use super::*;
+	use crate::new;
+
+	#[test]
+	fn mvcc_snapshot_isolation() {
+		let db: Database<&str, &str> = new();
+
+		let key1 = "key1";
+		let key2 = "key2";
+		let value1 = "baz";
+		let value2 = "bar";
+
+		// no conflict
+		{
+			let mut txn1 = db.begin(true);
+			let mut txn2 = db.begin(true);
+
+			txn1.set(key1, value1).unwrap();
+			txn1.commit().unwrap();
+
+			assert!(txn2.get(key2).unwrap().is_none());
+			txn2.set(key2, value2).unwrap();
+			txn2.commit().unwrap();
+		}
+
+		// conflict when the read key was updated by another transaction
+		{
+			let mut txn1 = db.begin(true);
+			let mut txn2 = db.begin(true);
+
+			txn1.set(key1, value1).unwrap();
+			txn1.commit().unwrap();
+
+			assert!(txn2.get(key1).is_ok());
+			txn2.set(key1, value2).unwrap();
+			assert!(txn2.commit().is_err());
+		}
+
+		// blind writes should not succeed
+		{
+			let mut txn1 = db.begin(true);
+			let mut txn2 = db.begin(true);
+
+			txn1.set(key1, value1).unwrap();
+			txn2.set(key1, value2).unwrap();
+
+			txn1.commit().unwrap();
+			assert!(txn2.commit().is_err());
+		}
+
+		// conflict when the read key was updated by another transaction
+		{
+			let key = "key3";
+
+			let mut txn1 = db.begin(true);
+			let mut txn2 = db.begin(true);
+
+			txn1.set(key, value1).unwrap();
+			txn1.commit().unwrap();
+
+			assert!(txn2.get(key).unwrap().is_none());
+			txn2.set(key, value1).unwrap();
+			assert!(txn2.commit().is_err());
+		}
+
+		// write-skew: read conflict when the read key was deleted by another transaction
+		{
+			let key = "key4";
+
+			let mut txn1 = db.begin(true);
+			txn1.set(key, value1).unwrap();
+			txn1.commit().unwrap();
+
+			let mut txn2 = db.begin(true);
+			let mut txn3 = db.begin(true);
+
+			txn2.del(key).unwrap();
+			assert!(txn2.commit().is_ok());
+
+			assert!(txn3.get(key).is_ok());
+			txn3.set(key, value2).unwrap();
+			assert!(txn3.commit().is_ok());
+		}
+	}
+
+	#[test]
+	fn mvcc_snapshot_isolation_scan() {
+		let db: Database<&str, &str> = new();
+
+		let key1 = "key1";
+		let key2 = "key2";
+		let key3 = "key3";
+		let key4 = "key4";
+		let value1 = "value1";
+		let value2 = "value2";
+		let value3 = "value3";
+		let value4 = "value4";
+		let value5 = "value5";
+		let value6 = "value6";
+
+		// conflict when scan keys have been updated in another transaction
+		{
+			let mut txn1 = db.begin(true);
+
+			txn1.set(key1, value1).unwrap();
+			txn1.commit().unwrap();
+
+			let mut txn2 = db.begin(true);
+			let mut txn3 = db.begin(true);
+
+			txn2.set(key1, value4).unwrap();
+			txn2.set(key2, value2).unwrap();
+			txn2.set(key3, value3).unwrap();
+			txn2.commit().unwrap();
+
+			let range = "key1".."key4";
+			let results = txn3.scan(range, 10).unwrap();
+			assert_eq!(results.len(), 1);
+			txn3.set(key2, value5).unwrap();
+			txn3.set(key3, value6).unwrap();
+
+			assert!(txn3.commit().is_err());
+		}
+
+		// write-skew: read conflict when read keys are deleted by other transaction
+		{
+			let mut txn1 = db.begin(true);
+
+			txn1.set(key4, value1).unwrap();
+			txn1.commit().unwrap();
+
+			let mut txn2 = db.begin(true);
+			let mut txn3 = db.begin(true);
+
+			txn2.del(key4).unwrap();
+			txn2.commit().unwrap();
+
+			let range = "key1".."key5";
+			let _ = txn3.scan(range, 10).unwrap();
+			txn3.set(key4, value2).unwrap();
+			assert!(txn3.commit().is_ok());
+		}
+	}
+}
