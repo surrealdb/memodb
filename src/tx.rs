@@ -37,6 +37,8 @@ where
 	/// Is the transaction writeable?
 	write: bool,
 	/// The version at which this transaction started
+	commit: u64,
+	/// The version at which this transaction started
 	version: u64,
 	/// The local set of updates and deletes
 	updates: BTreeMap<K, Option<V>>,
@@ -50,10 +52,22 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	fn drop(&mut self) {
-		// Fetch the transaction counter
-		if let Some(count) = self.database.transactions.get(&self.version) {
-			// Decrement the transaction counter
-			count.value().fetch_sub(1, Ordering::SeqCst);
+		// Fetch the transaction counter for this snapshot version
+		if let Some(entry) = self.database.transactions.get(&self.version) {
+			// Decrement the transaction counter for this snapshot version
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			// Check if we can clear up the transaction counter for this snapshot version
+			if total == 0 && self.database.sequence.load(Ordering::SeqCst) > self.version {
+				// Check if there are previous transactions
+				if entry.prev().is_none() {
+					// Remove the entries from the commit queue up to this version
+					self.database.transaction_commit_queue.range(..=&self.version).for_each(|e| {
+						e.remove();
+					});
+				}
+				// Remove the transaction entry for this snapshot version
+				entry.remove();
+			}
 		}
 	}
 }
@@ -65,6 +79,8 @@ where
 {
 	/// Create a new read-only transaction
 	pub(crate) fn read(db: Database<K, V>) -> Transaction<K, V> {
+		// Get the current commit sequence number
+		let commit = db.transaction_queue_id.load(Ordering::SeqCst);
 		// Get the current version sequence number
 		let version = db.sequence.load(Ordering::SeqCst);
 		// Initialise the transaction counter
@@ -77,6 +93,7 @@ where
 		Transaction {
 			done: false,
 			write: false,
+			commit,
 			version,
 			updates: BTreeMap::new(),
 			database: db,
@@ -85,6 +102,8 @@ where
 
 	/// Create a new writeable transaction
 	pub(crate) fn write(db: Database<K, V>) -> Transaction<K, V> {
+		// Get the current commit sequence number
+		let commit = db.transaction_queue_id.load(Ordering::SeqCst);
 		// Get the current version sequence number
 		let version = db.sequence.load(Ordering::SeqCst);
 		// Initialise the transaction counter
@@ -97,6 +116,7 @@ where
 		Transaction {
 			done: false,
 			write: true,
+			commit,
 			version,
 			updates: BTreeMap::new(),
 			database: db,
@@ -152,7 +172,7 @@ where
 		// Fetch the entry for the current transaction
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
-		for tx in self.database.transaction_commit_queue.range(self.version..commit) {
+		for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit) {
 			// A previous transaction has conflicting modifications
 			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
 				// Remove the transaction from the commit queue
@@ -381,7 +401,7 @@ where
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if tv
 							// Iterate through the entry versions
@@ -399,6 +419,10 @@ where
 						}
 						tree_next = tree_iter.next();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.next();
+						}
 						// Add this entry if it is not a delete
 						if sv.clone().is_some() {
 							res.push(sk.clone());
@@ -471,7 +495,7 @@ where
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if tv
 							// Iterate through the entry versions
@@ -489,6 +513,10 @@ where
 						}
 						tree_next = tree_iter.prev();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.prev();
+						}
 						// Add this entry if it is not a delete
 						if sv.clone().is_some() {
 							res.push(sk.clone());
@@ -561,7 +589,7 @@ where
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv
 							// Iterate through the entry versions
@@ -577,6 +605,10 @@ where
 						}
 						tree_next = tree_iter.next();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.next();
+						}
 						// Add this entry if it is not a delete
 						if let Some(v) = sv.clone() {
 							res.push((sk.clone(), v));
@@ -647,7 +679,7 @@ where
 			match (tree_next, self_next) {
 				// Both iterators have items, we need to compare
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk {
+					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv
 							// Iterate through the entry versions
@@ -663,6 +695,10 @@ where
 						}
 						tree_next = tree_iter.prev();
 					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = tree_iter.prev();
+						}
 						// Add this entry if it is not a delete
 						if let Some(v) = sv.clone() {
 							res.push((sk.clone(), v));
@@ -748,5 +784,194 @@ where
 			// if the key is not present in
 			// the tree at all.
 			.flatten()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+
+	use super::*;
+	use crate::new;
+
+	#[test]
+	fn mvcc_non_conflicting_keys_should_succeed() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key2").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_ok());
+	}
+
+	#[test]
+	fn mvcc_conflicting_blind_writes_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key1", "value2").unwrap();
+		// ----------
+		assert!(tx1.commit().is_ok());
+		assert!(tx2.commit().is_err());
+	}
+
+	#[test]
+	fn mvcc_conflicting_read_keys_should_succeed() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_ok());
+	}
+
+	#[test]
+	fn mvcc_conflicting_write_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		let mut tx2 = db.begin(true);
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key1", "value2").unwrap();
+		assert!(tx2.commit().is_err());
+	}
+
+	#[test]
+	fn mvcc_conflicting_read_deleted_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		let mut tx2 = db.begin(true);
+		let mut tx3 = db.begin(true);
+		// ----------
+		assert!(tx2.get("key").unwrap().is_some());
+		tx2.del("key").unwrap();
+		assert!(tx2.commit().is_ok());
+		// ----------
+		assert!(tx3.get("key").unwrap().is_some());
+		tx3.set("key", "value2").unwrap();
+		assert!(tx3.commit().is_err());
+	}
+
+	#[test]
+	fn mvcc_scan_conflicting_write_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		let mut tx2 = db.begin(true);
+		let mut tx3 = db.begin(true);
+		// ----------
+		tx2.set("key1", "value4").unwrap();
+		tx2.set("key2", "value2").unwrap();
+		tx2.set("key3", "value3").unwrap();
+		assert!(tx2.commit().is_ok());
+		// ----------
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 1);
+		tx3.set("key2", "value5").unwrap();
+		tx3.set("key3", "value6").unwrap();
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 3);
+		assert!(tx3.commit().is_err());
+	}
+
+	#[test]
+	fn mvcc_scan_conflicting_read_deleted_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		let mut tx2 = db.begin(true);
+		let mut tx3 = db.begin(true);
+		// ----------
+		tx2.del("key1").unwrap();
+		assert!(tx2.commit().is_ok());
+		// ----------
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 1);
+		tx3.set("key1", "other").unwrap();
+		tx3.set("key2", "value2").unwrap();
+		tx3.set("key3", "value3").unwrap();
+		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		assert_eq!(res.len(), 3);
+		assert!(tx3.commit().is_err());
+	}
+
+	#[test]
+	fn mvcc_transaction_queue_correctness() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin(true);
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		std::mem::drop(tx1);
+		// ----------
+		let mut tx2 = db.begin(true);
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_ok());
+		std::mem::drop(tx2);
+		// ----------
+		let mut tx3 = db.begin(true);
+		tx3.set("key", "value").unwrap();
+		// ----------
+		let mut tx4 = db.begin(true);
+		tx4.set("key", "value").unwrap();
+		// ----------
+		assert!(tx3.commit().is_ok());
+		assert!(tx4.commit().is_err());
+		std::mem::drop(tx3);
+		std::mem::drop(tx4);
+		// ----------
+		let mut tx5 = db.begin(true);
+		tx5.set("key", "other").unwrap();
+		// ----------
+		let mut tx6 = db.begin(true);
+		tx6.set("key", "other").unwrap();
+		// ----------
+		assert!(tx5.commit().is_ok());
+		assert!(tx6.commit().is_err());
+		std::mem::drop(tx5);
+		std::mem::drop(tx6);
+		// ----------
+		let mut tx7 = db.begin(true);
+		tx7.set("key", "change").unwrap();
+		// ----------
+		let mut tx8 = db.begin(true);
+		tx8.set("key", "change").unwrap();
+		// ----------
+		assert!(tx7.commit().is_ok());
+		assert!(tx7.commit().is_err());
+		std::mem::drop(tx7);
+		std::mem::drop(tx8);
 	}
 }
