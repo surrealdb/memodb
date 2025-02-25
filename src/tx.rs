@@ -974,4 +974,282 @@ mod tests {
 		std::mem::drop(tx7);
 		std::mem::drop(tx8);
 	}
+
+	// Common setup logic for creating anomaly tests database
+	fn new_db() -> Database<&'static str, &'static str> {
+		let db: Database<&str, &str> = new();
+
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		// Start a new read-write transaction (txn)
+		let mut txn = db.begin(true);
+		txn.set(key1, value1).unwrap();
+		txn.set(key2, value2).unwrap();
+		txn.commit().unwrap();
+
+		db
+	}
+
+	// G0: Write Cycles (dirty writes)
+	#[test]
+	fn test_anomaly_g0() {
+		let db = new_db();
+		let key1 = "k1";
+		let key2 = "k2";
+		let value3 = "v3";
+		let value4 = "v4";
+		let value5 = "v5";
+		let value6 = "v6";
+
+		{
+			let mut txn1 = db.begin(true);
+			let mut txn2 = db.begin(true);
+
+			assert!(txn1.get(key1).is_ok());
+			assert!(txn1.get(key2).is_ok());
+			assert!(txn2.get(key1).is_ok());
+			assert!(txn2.get(key2).is_ok());
+
+			txn1.set(key1, value3).unwrap();
+			txn2.set(key1, value4).unwrap();
+
+			txn1.set(key2, value5).unwrap();
+
+			txn1.commit().unwrap();
+
+			txn2.set(key2, value6).unwrap();
+			assert!(txn2.commit().is_err());
+		}
+
+		{
+			let txn3 = db.begin(false);
+			let val1 = txn3.get(key1).unwrap().unwrap();
+			assert_eq!(val1, value3);
+			let val2 = txn3.get(key2).unwrap().unwrap();
+			assert_eq!(val2, value5);
+		}
+	}
+
+	// G1a: Aborted Reads (dirty reads, cascaded aborts)
+	#[test]
+	fn test_anomaly_g1a() {
+		let db = new_db();
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+
+		{
+			let mut txn1 = db.begin(true);
+			let mut txn2 = db.begin(true);
+
+			assert!(txn1.get(key1).is_ok());
+
+			txn1.set(key1, value3).unwrap();
+
+			let range = "k1".."k3";
+			let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+			assert_eq!(res.len(), 2);
+			assert_eq!(res[0].1, value1);
+
+			drop(txn1);
+
+			let res = txn2.scan(range, None).expect("Scan should succeed");
+			assert_eq!(res.len(), 2);
+			assert_eq!(res[0].1, value1);
+
+			txn2.commit().unwrap();
+		}
+
+		{
+			let txn3 = db.begin(false);
+			let val1 = txn3.get(key1).unwrap().unwrap();
+			assert_eq!(val1, value1);
+			let val2 = txn3.get(key2).unwrap().unwrap();
+			assert_eq!(val2, value2);
+		}
+	}
+
+	// G1b: Intermediate Reads (dirty reads)
+	#[test]
+	fn test_anomaly_g1b() {
+		let db = new_db();
+
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		let mut txn1 = db.begin(true);
+		let mut txn2 = db.begin(true);
+
+		assert!(txn1.get(key1).is_ok());
+		assert!(txn1.get(key2).is_ok());
+
+		txn1.set(key1, value3).unwrap();
+
+		let range = "k1".."k3";
+		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+
+		txn1.set(key1, value4).unwrap();
+		txn1.commit().unwrap();
+
+		let res = txn2.scan(range, None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+
+		txn2.commit().unwrap();
+	}
+
+	// PMP: Predicate-Many-Preceders
+	#[test]
+	fn test_anomaly_pmp() {
+		let db = new_db();
+
+		let key3 = "k3";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+
+		let txn1 = db.begin(true);
+		let mut txn2 = db.begin(true);
+
+		// k3 should not be visible to txn1
+		let range = "k1".."k3";
+		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+
+		// k3 is committed by txn2
+		txn2.set(key3, value3).unwrap();
+		txn2.commit().unwrap();
+
+		// k3 should still not be visible to txn1
+		let range = "k1".."k3";
+		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+	}
+
+	// P4: Lost Update
+	#[test]
+	fn test_anomaly_p4() {
+		let db = new_db();
+
+		let key1 = "k1";
+		let value3 = "v3";
+
+		let mut txn1 = db.begin(true);
+		let mut txn2 = db.begin(true);
+
+		assert!(txn1.get(key1).is_ok());
+		assert!(txn2.get(key1).is_ok());
+
+		txn1.set(key1, value3).unwrap();
+		txn2.set(key1, value3).unwrap();
+
+		txn1.commit().unwrap();
+		assert!(txn2.commit().is_err());
+	}
+
+	// G-single: Single Anti-dependency Cycles (read skew)
+	#[test]
+	fn test_anomaly_g_single() {
+		let db = new_db();
+
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		let mut txn1 = db.begin(true);
+		let mut txn2 = db.begin(true);
+
+		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
+		assert_eq!(txn2.get(key1).unwrap().unwrap(), value1);
+		assert_eq!(txn2.get(key2).unwrap().unwrap(), value2);
+		txn2.set(key1, value3).unwrap();
+		txn2.set(key2, value4).unwrap();
+
+		txn2.commit().unwrap();
+
+		assert_eq!(txn1.get(key2).unwrap().unwrap(), value2);
+		txn1.commit().unwrap();
+	}
+
+	// G-single-write-1: Single Anti-dependency Cycles (read skew)
+	#[test]
+	fn test_anomaly_g_single_write_1() {
+		let db = new_db();
+
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		let mut txn1 = db.begin(true);
+		let mut txn2 = db.begin(true);
+
+		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
+
+		let range = "k1".."k2";
+		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+
+		txn2.set(key1, value3).unwrap();
+		txn2.set(key2, value4).unwrap();
+
+		txn2.commit().unwrap();
+
+		txn1.del(key2).unwrap();
+		assert!(txn1.get(key2).unwrap().is_none());
+		assert!(txn1.commit().is_err());
+	}
+
+	// G-single-write-2: Single Anti-dependency Cycles (read skew)
+	#[test]
+	fn test_anomaly_g_single_write_2() {
+		let db = new_db();
+
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		let mut txn1 = db.begin(true);
+		let mut txn2 = db.begin(true);
+
+		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
+		let range = "k1".."k2";
+		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+
+		txn2.set(key1, value3).unwrap();
+
+		txn1.del(key2).unwrap();
+
+		txn2.set(key2, value4).unwrap();
+
+		drop(txn1);
+
+		txn2.commit().unwrap();
+	}
 }
