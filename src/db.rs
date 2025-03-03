@@ -36,9 +36,9 @@ where
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free B+tree datastructure
 	pub(crate) datastore: Arc<BPlusTree<K, SortedVec<Version<V>>>>,
-	/// A count of total transactions grouped by sequence number
+	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: Arc<SkipMap<u64, AtomicU64>>,
-	/// A count of total transactions grouped by sequence number
+	/// A count of total transactions grouped by commit id
 	pub(crate) counter_by_commit: Arc<SkipMap<u64, AtomicU64>>,
 	/// The transaction commit queue sequence number
 	pub(crate) transaction_commit: Arc<AtomicU64>,
