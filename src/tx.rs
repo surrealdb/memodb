@@ -81,7 +81,7 @@ where
 					self.database.counter_by_commit.range(..=&self.commit).for_each(|e| {
 						e.remove();
 					});
-					//
+					// Remove the commits up to this commit queue id from the transaction queue
 					self.database.transaction_commit_queue.range(..=&self.commit).for_each(|e| {
 						e.remove();
 					});
