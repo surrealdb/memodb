@@ -744,27 +744,18 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Get the last entry
-		let mut entry = self.database.transaction_merge_queue.back();
-		// Loop over all entries
-		loop {
-			// Check the current entry iteration
-			match entry {
-				// There is a valid merge queue entry
-				Some(e) if !e.is_removed() => {
-					// Check if the entry has a key
-					match e.value().get(key.borrow()) {
-						// Return the entry value
-						Some(v) => return v.clone(),
-						// Go to an older merge entry
-						_ => entry = e.prev(),
-					}
-					// Continue looping through entries
-					continue;
+		// Check the current entry iteration
+		for entry in self.database.transaction_merge_queue.range(..=self.commit) {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				match entry.value().get(key.borrow()) {
+					// Return the entry value
+					Some(v) => return v.clone(),
+					// Go to an older merge entry
+					_ => (),
 				}
-				// No more entries so break the loop
-				_ => break,
-			};
+			}
 		}
 		// Check the key
 		self.database
@@ -788,27 +779,18 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Get the last entry
-		let mut entry = self.database.transaction_merge_queue.back();
-		// Loop over all entries
-		loop {
-			// Check the current entry iteration
-			match entry {
-				// There is a valid merge queue entry
-				Some(e) if !e.is_removed() => {
-					// Check if the entry has a key
-					match e.value().get(key.borrow()) {
-						// Check if the value exists
-						Some(v) => return v.is_some(),
-						// Go to an older merge entry
-						_ => entry = e.prev(),
-					}
-					// Continue looping through entries
-					continue;
+		// Check the current entry iteration
+		for entry in self.database.transaction_merge_queue.range(..=self.commit) {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				match entry.value().get(key.borrow()) {
+					// Return the entry value
+					Some(v) => return v.is_some(),
+					// Go to an older merge entry
+					_ => (),
 				}
-				// No more entries so break the loop
-				_ => break,
-			};
+			}
 		}
 		// Check the key
 		self.database
@@ -833,27 +815,18 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Get the last entry
-		let mut entry = self.database.transaction_merge_queue.back();
-		// Loop over all entries
-		loop {
-			// Check the current entry iteration
-			match entry {
-				// There is a valid merge queue entry
-				Some(e) if !e.is_removed() => {
-					// Check if the entry has a key
-					match e.value().get(key.borrow()) {
-						// Check if the value matches
-						Some(v) => return v == &chk,
-						// Go to an older merge entry
-						_ => entry = e.prev(),
-					}
-					// Continue looping through entries
-					continue;
+		// Check the current entry iteration
+		for entry in self.database.transaction_merge_queue.range(..=self.commit) {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				match entry.value().get(key.borrow()) {
+					// Return the entry value
+					Some(v) => return v == &chk,
+					// Go to an older merge entry
+					_ => (),
 				}
-				// No more entries so break the loop
-				_ => break,
-			};
+			}
 		}
 		// Check the key
 		chk == self
