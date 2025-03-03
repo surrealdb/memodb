@@ -735,6 +735,7 @@ where
 		Ok(res)
 	}
 
+	/// Fetch a key if it exists in the datastore only
 	fn fetch_in_datastore<Q>(&self, key: Q) -> Option<V>
 	where
 		Q: Borrow<K>,
