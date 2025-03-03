@@ -754,7 +754,7 @@ where
 				Some(e) if !e.is_removed() => {
 					// Check if the entry has a key
 					match e.value().get(key.borrow()) {
-						// Check if the value matches
+						// Return the entry value
 						Some(v) => return v.clone(),
 						// Go to an older merge entry
 						_ => entry = e.prev(),
@@ -798,7 +798,7 @@ where
 				Some(e) if !e.is_removed() => {
 					// Check if the entry has a key
 					match e.value().get(key.borrow()) {
-						// Check if the value matches
+						// Check if the value exists
 						Some(v) => return v.is_some(),
 						// Go to an older merge entry
 						_ => entry = e.prev(),
