@@ -257,21 +257,7 @@ where
 			// The key exists in the writeset
 			Some(v) => v.clone(),
 			// Check for the key in the tree
-			None => self
-				.database
-				.datastore
-				.lookup(key.borrow(), |v| {
-					v.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
-						// Return just the entry value
-						.and_then(|v| v.value.clone())
-				})
-				// The result will be None if the
-				// key is not present in the tree
-				.flatten(),
+			None => self.fetch_in_datastore(key.borrow()),
 		};
 		// Return result
 		Ok(res)
@@ -747,6 +733,26 @@ where
 		}
 		// Return result
 		Ok(res)
+	}
+
+	fn fetch_in_datastore<Q>(&self, key: Q) -> Option<V>
+	where
+		Q: Borrow<K>,
+	{
+		self.database
+			.datastore
+			.lookup(key.borrow(), |v| {
+				v.iter()
+					// Reverse iterate through the versions
+					.rev()
+					// Get the version prior to this transaction
+					.find(|v| v.version <= self.version)
+					// Return just the entry value
+					.and_then(|v| v.value.clone())
+			})
+			// The result will be None if the
+			// key is not present in the tree
+			.flatten()
 	}
 
 	/// Check if a key exists in the datastore only
