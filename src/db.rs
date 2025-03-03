@@ -21,6 +21,7 @@ use crate::version::Version;
 use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
 use sorted_vec::SortedVec;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -44,6 +45,8 @@ where
 	pub(crate) transaction_commit: Arc<AtomicU64>,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: Arc<SkipMap<u64, Commit<K>>>,
+	/// Transaction updates which are committed but not yet applied
+	pub(crate) transaction_merge_queue: Arc<SkipMap<u64, BTreeMap<K, Option<V>>>>,
 }
 
 /// Create a new transactional in-memory database
@@ -59,6 +62,7 @@ where
 		counter_by_commit: Arc::new(SkipMap::new()),
 		transaction_commit: Arc::new(AtomicU64::new(0)),
 		transaction_commit_queue: Arc::new(SkipMap::new()),
+		transaction_merge_queue: Arc::new(SkipMap::new()),
 	}
 }
 
