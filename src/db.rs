@@ -15,6 +15,7 @@
 //! This module stores the core in-memory database type.
 
 use crate::commit::Commit;
+use crate::oracle::Oracle;
 use crate::tx::Transaction;
 use crate::version::Version;
 use bplustree::BPlusTree;
@@ -31,14 +32,16 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// The current datastore sequence number
-	pub(crate) sequence: Arc<AtomicU64>,
+	/// The timestamp version oracle
+	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free B+tree datastructure
 	pub(crate) datastore: Arc<BPlusTree<K, SortedVec<Version<V>>>>,
-	/// A list of total transactions ordered by sequence number
-	pub(crate) transactions: Arc<SkipMap<u64, AtomicU64>>,
+	/// A count of total transactions grouped by sequence number
+	pub(crate) counter_by_oracle: Arc<SkipMap<u64, AtomicU64>>,
+	/// A count of total transactions grouped by sequence number
+	pub(crate) counter_by_commit: Arc<SkipMap<u64, AtomicU64>>,
 	/// The transaction commit queue sequence number
-	pub(crate) transaction_queue_id: Arc<AtomicU64>,
+	pub(crate) transaction_commit: Arc<AtomicU64>,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: Arc<SkipMap<u64, Commit<K>>>,
 }
@@ -50,10 +53,11 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	Database {
-		sequence: Arc::new(AtomicU64::new(0)),
+		oracle: Arc::new(Oracle::new()),
 		datastore: Arc::new(BPlusTree::new()),
-		transactions: Arc::new(SkipMap::new()),
-		transaction_queue_id: Arc::new(AtomicU64::new(0)),
+		counter_by_oracle: Arc::new(SkipMap::new()),
+		counter_by_commit: Arc::new(SkipMap::new()),
+		transaction_commit: Arc::new(AtomicU64::new(0)),
 		transaction_commit_queue: Arc::new(SkipMap::new()),
 	}
 }
@@ -65,10 +69,7 @@ where
 {
 	/// Start a new read-only or writeable transaction
 	pub fn begin(&self, write: bool) -> Transaction<K, V> {
-		match write {
-			true => Transaction::write(self.clone()),
-			false => Transaction::read(self.clone()),
-		}
+		Transaction::new(self.clone(), write)
 	}
 }
 

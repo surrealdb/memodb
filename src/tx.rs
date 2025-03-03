@@ -53,15 +53,36 @@ where
 {
 	fn drop(&mut self) {
 		// Fetch the transaction counter for this snapshot version
-		if let Some(entry) = self.database.transactions.get(&self.version) {
+		if let Some(entry) = self.database.counter_by_oracle.get(&self.version) {
 			// Decrement the transaction counter for this snapshot version
 			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
 			// Check if we can clear up the transaction counter for this snapshot version
-			if total == 0 && self.database.sequence.load(Ordering::SeqCst) > self.version {
+			if total == 0 && self.database.oracle.current_timestamp() > self.version {
 				// Check if there are previous transactions
 				if entry.prev().is_none() {
-					// Remove the entries from the commit queue up to this version
-					self.database.transaction_commit_queue.range(..=&self.version).for_each(|e| {
+					// Remove the transaction entries up to this version
+					self.database.counter_by_oracle.range(..=&self.version).for_each(|e| {
+						e.remove();
+					});
+				}
+				// Remove the transaction entry for this snapshot version
+				entry.remove();
+			}
+		}
+		// Fetch the transaction counter for this commit queue id
+		if let Some(entry) = self.database.counter_by_commit.get(&self.commit) {
+			// Decrement the transaction counter for this commit queue id
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			// Check if we can clear up the transaction counter for this commit queue id
+			if total == 0 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
+				// Check if there are previous transactions
+				if entry.prev().is_none() {
+					// Remove the counter entries up to this commit queue id
+					self.database.counter_by_commit.range(..=&self.commit).for_each(|e| {
+						e.remove();
+					});
+					//
+					self.database.transaction_commit_queue.range(..=&self.commit).for_each(|e| {
 						e.remove();
 					});
 				}
@@ -77,45 +98,34 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// Create a new read-only transaction
-	pub(crate) fn read(db: Database<K, V>) -> Transaction<K, V> {
-		// Get the current commit sequence number
-		let commit = db.transaction_queue_id.load(Ordering::SeqCst);
-		// Get the current version sequence number
-		let version = db.sequence.load(Ordering::SeqCst);
-		// Initialise the transaction counter
-		let count = db.transactions.get_or_insert_with(version, || AtomicU64::new(0));
-		// Increment the transaction counter
-		count.value().fetch_add(1, Ordering::SeqCst);
-		// Drop the counter borrow
-		std::mem::drop(count);
+	/// Create a new read-only or writeable transaction
+	pub(crate) fn new(db: Database<K, V>, write: bool) -> Transaction<K, V> {
+		// Prepare and increment the oracle counter
+		let version = {
+			// Get the current version sequence number
+			let value = db.oracle.current_timestamp();
+			// Initialise the transaction oracle counter
+			let count = db.counter_by_oracle.get_or_insert_with(value, || AtomicU64::new(1));
+			// Increment the transaction oracle counter
+			count.value().fetch_add(1, Ordering::SeqCst);
+			// Return the value
+			value
+		};
+		// Prepare and increment the commit counter
+		let commit = {
+			// Get the current commit sequence number
+			let value = db.transaction_commit.load(Ordering::SeqCst);
+			// Initialise the transaction commit counter
+			let count = db.counter_by_commit.get_or_insert_with(value, || AtomicU64::new(1));
+			// Increment the transaction commit counter
+			count.value().fetch_add(1, Ordering::SeqCst);
+			// Return the value
+			value
+		};
 		// Create the read only transaction
 		Transaction {
 			done: false,
-			write: false,
-			commit,
-			version,
-			updates: BTreeMap::new(),
-			database: db,
-		}
-	}
-
-	/// Create a new writeable transaction
-	pub(crate) fn write(db: Database<K, V>) -> Transaction<K, V> {
-		// Get the current commit sequence number
-		let commit = db.transaction_queue_id.load(Ordering::SeqCst);
-		// Get the current version sequence number
-		let version = db.sequence.load(Ordering::SeqCst);
-		// Initialise the transaction counter
-		let count = db.transactions.get_or_insert_with(version, || AtomicU64::new(0));
-		// Increment the transaction counter
-		count.value().fetch_add(1, Ordering::SeqCst);
-		// Drop the counter borrow
-		std::mem::drop(count);
-		// Create the writeable transaction
-		Transaction {
-			done: false,
-			write: true,
+			write,
 			commit,
 			version,
 			updates: BTreeMap::new(),
@@ -160,7 +170,7 @@ where
 		// Mark this transaction as done
 		self.done = true;
 		// Increase the transaction commit queue number
-		let commit = self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
+		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
 		// Insert this transaction into the commit queue
 		self.database.transaction_commit_queue.insert(
 			commit,
@@ -182,7 +192,7 @@ where
 			}
 		}
 		// Increase the datastore sequence number
-		let version = self.database.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+		let version = self.database.oracle.next_timestamp();
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
