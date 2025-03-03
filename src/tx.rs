@@ -158,7 +158,7 @@ where
 	}
 
 	/// Commit the transaction and store all changes
-	pub fn commit(&mut self) -> Result<(), Error> {
+	pub fn commit(&mut self) -> Result<u64, Error> {
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -224,7 +224,7 @@ where
 		// Mark the transaction as done
 		txn.value().done.store(true, Ordering::SeqCst);
 		// Continue
-		Ok(())
+		Ok(version)
 	}
 
 	/// Check if a key exists in the database
