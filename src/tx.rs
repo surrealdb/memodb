@@ -749,7 +749,7 @@ where
 		Q: Borrow<K>,
 	{
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.commit) {
+		for entry in self.database.transaction_merge_queue.range(..=self.commit).rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
@@ -784,7 +784,7 @@ where
 		Q: Borrow<K>,
 	{
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.commit) {
+		for entry in self.database.transaction_merge_queue.range(..=self.commit).rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
@@ -820,7 +820,7 @@ where
 		Q: Borrow<K>,
 	{
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.commit) {
+		for entry in self.database.transaction_merge_queue.range(..=self.commit).rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
