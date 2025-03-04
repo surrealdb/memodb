@@ -55,9 +55,9 @@ where
 		// Fetch the transaction counter for this snapshot version
 		if let Some(entry) = self.database.counter_by_oracle.get(&self.version) {
 			// Decrement the transaction counter for this snapshot version
-			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
 			// Check if we can clear up the transaction counter for this snapshot version
-			if total == 0 && self.database.oracle.current_timestamp() > self.version {
+			if total == 1 && self.database.oracle.current_timestamp() > self.version {
 				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the transaction entries up to this version
@@ -72,9 +72,9 @@ where
 		// Fetch the transaction counter for this commit queue id
 		if let Some(entry) = self.database.counter_by_commit.get(&self.commit) {
 			// Decrement the transaction counter for this commit queue id
-			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
 			// Check if we can clear up the transaction counter for this commit queue id
-			if total == 0 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
+			if total == 1 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
 				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the counter entries up to this commit queue id
