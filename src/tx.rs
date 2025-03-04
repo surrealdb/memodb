@@ -169,6 +169,8 @@ where
 		}
 		// Mark this transaction as done
 		self.done = true;
+		// Clone the transaction modification keyset
+		let keyset = self.updates.keys().cloned().collect();
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
 		// Insert this transaction into the commit queue
@@ -176,7 +178,7 @@ where
 			commit,
 			Commit {
 				done: AtomicBool::new(false),
-				keyset: self.updates.keys().cloned().collect(),
+				keyset,
 			},
 		);
 		// Fetch the entry for the current transaction
@@ -191,10 +193,12 @@ where
 				return Err(Error::KeyWriteConflict);
 			}
 		}
-		// Add this transaction to the merge queue
-		self.database.transaction_merge_queue.insert(commit, self.updates.clone());
+		// CLone the transaction modification
+		let updates = self.updates.clone();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
+		// Add this transaction to the merge queue
+		self.database.transaction_merge_queue.insert(commit, updates);
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
