@@ -198,7 +198,7 @@ where
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
 		// Add this transaction to the merge queue
-		self.database.transaction_merge_queue.insert(commit, updates);
+		self.database.transaction_merge_queue.insert(version, updates);
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
@@ -222,7 +222,7 @@ where
 			}
 		}
 		// Remove this transaction from the merge queue
-		self.database.transaction_merge_queue.remove(&commit);
+		self.database.transaction_merge_queue.remove(&version);
 		// Fetch the transaction entry in the commit queue
 		let txn = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Mark the transaction as done
@@ -749,7 +749,7 @@ where
 		Q: Borrow<K>,
 	{
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.commit).rev() {
+		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
@@ -784,7 +784,7 @@ where
 		Q: Borrow<K>,
 	{
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.commit).rev() {
+		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
@@ -820,7 +820,7 @@ where
 		Q: Borrow<K>,
 	{
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.commit).rev() {
+		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
