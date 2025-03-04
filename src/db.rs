@@ -23,8 +23,13 @@ use crossbeam_skiplist::SkipMap;
 use sorted_vec::SortedVec;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+const GC_FREQUENCY: Duration = Duration::from_secs(5);
 
 /// A transactional in-memory database
 #[derive(Clone)]
@@ -47,6 +52,20 @@ where
 	pub(crate) transaction_commit_queue: Arc<SkipMap<u64, Commit<K>>>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: Arc<SkipMap<u64, BTreeMap<K, Option<V>>>>,
+	/// Specifies whether garbage collection is enabled in the background
+	pub(crate) garbage_collection_enabled: Arc<AtomicBool>,
+	/// Stores a handle to the current garbage collection background thread
+	pub(crate) garbage_collection_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl<K, V> Drop for Database<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	fn drop(&mut self) {
+		self.shutdown();
+	}
 }
 
 /// Create a new transactional in-memory database
@@ -55,15 +74,7 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	Database {
-		oracle: Arc::new(Oracle::new()),
-		datastore: Arc::new(BPlusTree::new()),
-		counter_by_oracle: Arc::new(SkipMap::new()),
-		counter_by_commit: Arc::new(SkipMap::new()),
-		transaction_commit: Arc::new(AtomicU64::new(0)),
-		transaction_commit_queue: Arc::new(SkipMap::new()),
-		transaction_merge_queue: Arc::new(SkipMap::new()),
-	}
+	Database::new()
 }
 
 impl<K, V> Database<K, V>
@@ -71,9 +82,119 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// Start a new read-only or writeable transaction
+	/// Create a new transactional in-memory database
+	pub fn new() -> Database<K, V> {
+		Database {
+			oracle: Arc::new(Oracle::new()),
+			datastore: Arc::new(BPlusTree::new()),
+			counter_by_oracle: Arc::new(SkipMap::new()),
+			counter_by_commit: Arc::new(SkipMap::new()),
+			transaction_commit: Arc::new(AtomicU64::new(0)),
+			transaction_commit_queue: Arc::new(SkipMap::new()),
+			transaction_merge_queue: Arc::new(SkipMap::new()),
+			garbage_collection_enabled: Arc::new(AtomicBool::new(true)),
+			garbage_collection_handle: Arc::new(Mutex::new(None)),
+		}
+	}
+
+	/// Create a new database with inactive garbage collection.
+	///
+	/// This function will create a background thread which
+	/// will periodically remove any MVCC transaction entries
+	/// which are older than the current database timestamp,
+	/// and which are no longer being used by any long-running
+	/// transactions. Effectively previous versions are cleaned
+	/// up and removed as soon as possible, whilst ensuring
+	/// that transaction snapshots still operate correctly.
+	pub fn new_with_gc() -> Database<K, V> {
+		// Create the database
+		let db = Self::new();
+		// Start cleanup thread
+		db.gc(None);
+		// Return the database
+		db
+	}
+
+	/// Create a new database with historic garbage collection.
+	///
+	/// This function will create a background thread which
+	/// will periodically remove any MVCC transaction entries
+	/// which are older than the historic duration subtracted
+	/// from the current database timestamp, and which are no
+	/// longer being used by any long-running transactions.
+	/// Effectively previous versions are cleaned up and
+	/// removed if the transaction entries are older than the
+	/// specified duration, whilst ensuring that transaction
+	/// snapshots still operate correctly.
+	pub fn new_with_gc_history(history: Duration) -> Database<K, V> {
+		// Create the database
+		let db = Self::new();
+		// Start cleanup thread
+		db.gc(Some(history));
+		// Return the database
+		db
+	}
+
+	/// Start a new transaction on this database
 	pub fn begin(&self, write: bool) -> Transaction<K, V> {
 		Transaction::new(self.clone(), write)
+	}
+
+	/// Shutdown the datastore, waiting for background threads to exit
+	fn shutdown(&self) {
+		// Disable garbage collection
+		self.garbage_collection_enabled.store(false, Ordering::SeqCst);
+		// Wait for the garbage collector thread to exit
+		if let Some(handle) = self.garbage_collection_handle.lock().unwrap().take() {
+			handle.join().unwrap();
+		}
+	}
+
+	/// Start the GC thread after creating the database
+	fn gc(&self, history: Option<Duration>) {
+		// Get the history duration as nanoseconds
+		let history = history.unwrap_or_default().as_nanos();
+		// Clone the database timestamp oracle
+		let oracle = self.oracle.clone();
+		// Clone the database underlying B+tree
+		let datastore = self.datastore.clone();
+		// Clone the transaction timestamp version counters
+		let transactions = self.counter_by_oracle.clone();
+		// Check whether the garbage collection process is enabled
+		let enabled = self.garbage_collection_enabled.clone();
+		// Spawn a new thread to handle periodic garbage collection
+		let handle = std::thread::spawn(move || {
+			while enabled.load(Ordering::SeqCst) {
+				// Wait for a specified time interval
+				std::thread::sleep(GC_FREQUENCY);
+				// Get the current timestamp version
+				let current_ts = oracle.current_timestamp();
+				// Get the earliest used timestamp version
+				let current_ts = transactions.front().map(|e| *e.key()).unwrap_or(current_ts);
+				// Get the time before which entries should be removed
+				let cleanup_ts = current_ts.saturating_sub(history as u64);
+				// Get a mutable iterator over the tree
+				let mut iter = datastore.raw_iter_mut();
+				// Start at the beginning of the tree
+				iter.seek_to_first();
+				// Iterate over the entire tree
+				while let Some((_, versions)) = iter.next() {
+					// Find the last version with `version < cleanup_ts`
+					if let Some(idx) = versions.iter().rposition(|v| v.version < cleanup_ts) {
+						// Check if the found version is a 'delete'
+						if versions[idx].value.is_none() {
+							// Remove all versions up to and including this version
+							versions.drain(..=idx);
+						} else if idx > 0 {
+							// Remove all versions up to this version
+							versions.drain(..idx);
+						};
+					}
+				}
+			}
+		});
+		// Store and track the thread handle
+		*self.garbage_collection_handle.lock().unwrap() = Some(handle);
 	}
 }
 
