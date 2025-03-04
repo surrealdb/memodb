@@ -58,7 +58,7 @@ where
 			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
 			// Check if we can clear up the transaction counter for this snapshot version
 			if total == 0 && self.database.oracle.current_timestamp() > self.version {
-				// Check if there are previous transactions
+				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the transaction entries up to this version
 					self.database.counter_by_oracle.range(..=&self.version).for_each(|e| {
@@ -75,7 +75,7 @@ where
 			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
 			// Check if we can clear up the transaction counter for this commit queue id
 			if total == 0 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
-				// Check if there are previous transactions
+				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the counter entries up to this commit queue id
 					self.database.counter_by_commit.range(..=&self.commit).for_each(|e| {
@@ -192,7 +192,7 @@ where
 				return Err(Error::KeyWriteConflict);
 			}
 		}
-		// CLone the transaction modification
+		// Clone the transaction modification
 		let updates = self.updates.clone();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
