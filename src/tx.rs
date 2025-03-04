@@ -170,17 +170,16 @@ where
 		// Mark this transaction as done
 		self.done = true;
 		// Clone the transaction modification keyset
-		let keyset = self.updates.keys().cloned().collect();
+		let updates = Commit {
+			done: AtomicBool::new(false),
+			keyset: self.updates.keys().cloned().collect(),
+		};
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
+		// Hint to the scheuler that we shouldn't switch context
+		std::hint::spin_loop();
 		// Insert this transaction into the commit queue
-		self.database.transaction_commit_queue.insert(
-			commit,
-			Commit {
-				done: AtomicBool::new(false),
-				keyset,
-			},
-		);
+		self.database.transaction_commit_queue.insert(commit, updates);
 		// Fetch the entry for the current transaction
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
@@ -197,6 +196,8 @@ where
 		let updates = self.updates.clone();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
+		// Hint to the scheuler that we shouldn't switch context
+		std::hint::spin_loop();
 		// Add this transaction to the merge queue
 		self.database.transaction_merge_queue.insert(version, updates);
 		// Get a mutable iterator over the tree
