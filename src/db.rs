@@ -58,6 +58,26 @@ where
 	pub(crate) garbage_collection_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
+impl<K, V> Default for Database<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	fn default() -> Self {
+		Database {
+			oracle: Arc::new(Oracle::new()),
+			datastore: Arc::new(BPlusTree::new()),
+			counter_by_oracle: Arc::new(SkipMap::new()),
+			counter_by_commit: Arc::new(SkipMap::new()),
+			transaction_commit: Arc::new(AtomicU64::new(0)),
+			transaction_commit_queue: Arc::new(SkipMap::new()),
+			transaction_merge_queue: Arc::new(SkipMap::new()),
+			garbage_collection_enabled: Arc::new(AtomicBool::new(true)),
+			garbage_collection_handle: Arc::new(Mutex::new(None)),
+		}
+	}
+}
+
 impl<K, V> Drop for Database<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
@@ -74,7 +94,7 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	Database::new()
+	Database::default()
 }
 
 impl<K, V> Database<K, V>
@@ -84,17 +104,7 @@ where
 {
 	/// Create a new transactional in-memory database
 	pub fn new() -> Database<K, V> {
-		Database {
-			oracle: Arc::new(Oracle::new()),
-			datastore: Arc::new(BPlusTree::new()),
-			counter_by_oracle: Arc::new(SkipMap::new()),
-			counter_by_commit: Arc::new(SkipMap::new()),
-			transaction_commit: Arc::new(AtomicU64::new(0)),
-			transaction_commit_queue: Arc::new(SkipMap::new()),
-			transaction_merge_queue: Arc::new(SkipMap::new()),
-			garbage_collection_enabled: Arc::new(AtomicBool::new(true)),
-			garbage_collection_handle: Arc::new(Mutex::new(None)),
-		}
+		Database::default()
 	}
 
 	/// Create a new database with inactive garbage collection.
