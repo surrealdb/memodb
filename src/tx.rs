@@ -754,11 +754,9 @@ where
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				match entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().get(key.borrow()) {
 					// Return the entry value
-					Some(v) => return v.clone(),
-					// Go to an older merge entry
-					_ => (),
+					return v.clone();
 				}
 			}
 		}
@@ -789,11 +787,9 @@ where
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				match entry.value().get(key.borrow()) {
-					// Return the entry value
-					Some(v) => return v.is_some(),
-					// Go to an older merge entry
-					_ => (),
+				if let Some(v) = entry.value().get(key.borrow()) {
+					// Return whether the entry exists
+					return v.is_some();
 				}
 			}
 		}
@@ -825,11 +821,9 @@ where
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				match entry.value().get(key.borrow()) {
-					// Return the entry value
-					Some(v) => return v == &chk,
-					// Go to an older merge entry
-					_ => (),
+				if let Some(v) = entry.value().get(key.borrow()) {
+					// Return whether the entry matches
+					return v == &chk;
 				}
 			}
 		}
