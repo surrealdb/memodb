@@ -55,10 +55,10 @@ where
 		// Fetch the transaction counter for this snapshot version
 		if let Some(entry) = self.database.counter_by_oracle.get(&self.version) {
 			// Decrement the transaction counter for this snapshot version
-			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
 			// Check if we can clear up the transaction counter for this snapshot version
-			if total == 0 && self.database.oracle.current_timestamp() > self.version {
-				// Check if there are previous transactions
+			if total == 1 && self.database.oracle.current_timestamp() > self.version {
+				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the transaction entries up to this version
 					self.database.counter_by_oracle.range(..=&self.version).for_each(|e| {
@@ -72,16 +72,16 @@ where
 		// Fetch the transaction counter for this commit queue id
 		if let Some(entry) = self.database.counter_by_commit.get(&self.commit) {
 			// Decrement the transaction counter for this commit queue id
-			let total = entry.value().fetch_sub(1, Ordering::SeqCst) - 1;
+			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
 			// Check if we can clear up the transaction counter for this commit queue id
-			if total == 0 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
-				// Check if there are previous transactions
+			if total == 1 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
+				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the counter entries up to this commit queue id
 					self.database.counter_by_commit.range(..=&self.commit).for_each(|e| {
 						e.remove();
 					});
-					//
+					// Remove the commits up to this commit queue id from the transaction queue
 					self.database.transaction_commit_queue.range(..=&self.commit).for_each(|e| {
 						e.remove();
 					});
@@ -158,7 +158,7 @@ where
 	}
 
 	/// Commit the transaction and store all changes
-	pub fn commit(&mut self) -> Result<(), Error> {
+	pub fn commit(&mut self) -> Result<u64, Error> {
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -169,16 +169,17 @@ where
 		}
 		// Mark this transaction as done
 		self.done = true;
+		// Clone the transaction modification keyset
+		let updates = Commit {
+			done: AtomicBool::new(false),
+			keyset: self.updates.keys().cloned().collect(),
+		};
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
+		// Hint to the scheuler that we shouldn't switch context
+		std::hint::spin_loop();
 		// Insert this transaction into the commit queue
-		self.database.transaction_commit_queue.insert(
-			commit,
-			Commit {
-				done: AtomicBool::new(false),
-				keyset: self.updates.keys().cloned().collect(),
-			},
-		);
+		self.database.transaction_commit_queue.insert(commit, updates);
 		// Fetch the entry for the current transaction
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
@@ -191,8 +192,14 @@ where
 				return Err(Error::KeyWriteConflict);
 			}
 		}
+		// Clone the transaction modification
+		let updates = self.updates.clone();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
+		// Hint to the scheuler that we shouldn't switch context
+		std::hint::spin_loop();
+		// Add this transaction to the merge queue
+		self.database.transaction_merge_queue.insert(version, updates);
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
@@ -215,12 +222,14 @@ where
 				);
 			}
 		}
+		// Remove this transaction from the merge queue
+		self.database.transaction_merge_queue.remove(&version);
 		// Fetch the transaction entry in the commit queue
 		let txn = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Mark the transaction as done
 		txn.value().done.store(true, Ordering::SeqCst);
 		// Continue
-		Ok(())
+		Ok(version)
 	}
 
 	/// Check if a key exists in the database
@@ -740,6 +749,20 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Check the current entry iteration
+		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				match entry.value().get(key.borrow()) {
+					// Return the entry value
+					Some(v) => return v.clone(),
+					// Go to an older merge entry
+					_ => (),
+				}
+			}
+		}
+		// Check the key
 		self.database
 			.datastore
 			.lookup(key.borrow(), |v| {
@@ -761,6 +784,19 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Check the current entry iteration
+		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				match entry.value().get(key.borrow()) {
+					// Return the entry value
+					Some(v) => return v.is_some(),
+					// Go to an older merge entry
+					_ => (),
+				}
+			}
+		}
 		// Check the key
 		self.database
 			.datastore
@@ -784,6 +820,19 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Check the current entry iteration
+		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				match entry.value().get(key.borrow()) {
+					// Return the entry value
+					Some(v) => return v == &chk,
+					// Go to an older merge entry
+					_ => (),
+				}
+			}
+		}
 		// Check the key
 		chk == self
 			.database
