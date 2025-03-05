@@ -200,8 +200,8 @@ where
 	}
 
 	/// Start a new transaction on this database
-	pub fn begin(&self, write: bool) -> Transaction<K, V> {
-		Transaction::new(self.clone(), write)
+	pub fn begin(&self) -> Transaction<K, V> {
+		Transaction::new(self.clone())
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit
@@ -269,39 +269,16 @@ mod tests {
 	use crate::kv::{Key, Val};
 
 	#[test]
-	fn begin_tx_readable() {
+	fn begin_tx() {
 		let db: Database<Key, Val> = new();
-		db.begin(false);
-	}
-
-	#[test]
-	fn begin_tx_writeable() {
-		let db: Database<Key, Val> = new();
-		db.begin(true);
-	}
-
-	#[test]
-	fn readable_tx_not_writable() {
-		let db: Database<&str, &str> = new();
-		// ----------
-		let mut tx = db.begin(false);
-		let res = tx.put("test", "something");
-		assert!(res.is_err());
-		let res = tx.set("test", "something");
-		assert!(res.is_err());
-		let res = tx.del("test");
-		assert!(res.is_err());
-		let res = tx.commit();
-		assert!(res.is_err());
-		let res = tx.cancel();
-		assert!(res.is_ok());
+		db.begin();
 	}
 
 	#[test]
 	fn finished_tx_not_writeable() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		let res = tx.put("test", "something");
@@ -320,7 +297,7 @@ mod tests {
 	fn cancelled_tx_is_cancelled() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -329,7 +306,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.exists("test").unwrap();
 		assert!(!res);
 		let res = tx.get("test").unwrap();
@@ -342,7 +319,7 @@ mod tests {
 	fn committed_tx_is_committed() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -351,7 +328,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
@@ -364,7 +341,7 @@ mod tests {
 	fn multiple_concurrent_readers() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -373,13 +350,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.begin(false);
+		let mut tx1 = db.begin();
 		let res = tx1.exists("test").unwrap();
 		assert!(res);
 		let res = tx1.exists("temp").unwrap();
 		assert!(!res);
 		// ----------
-		let mut tx2 = db.begin(false);
+		let mut tx2 = db.begin();
 		let res = tx2.exists("test").unwrap();
 		assert!(res);
 		let res = tx2.exists("temp").unwrap();
@@ -395,7 +372,7 @@ mod tests {
 	fn multiple_concurrent_operators() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -404,13 +381,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.begin(false);
+		let mut tx1 = db.begin();
 		let res = tx1.exists("test").unwrap();
 		assert!(res);
 		let res = tx1.exists("temp").unwrap();
 		assert!(!res);
 		// ----------
-		let mut txw = db.begin(true);
+		let mut txw = db.begin();
 		txw.put("temp", "other").unwrap();
 		let res = txw.exists("test").unwrap();
 		assert!(res);
@@ -419,7 +396,7 @@ mod tests {
 		let res = txw.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx2 = db.begin(false);
+		let mut tx2 = db.begin();
 		let res = tx2.exists("test").unwrap();
 		assert!(res);
 		let res = tx2.exists("temp").unwrap();
@@ -438,7 +415,7 @@ mod tests {
 	fn iterate_keys_forward() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -469,7 +446,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.keys("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
@@ -490,7 +467,7 @@ mod tests {
 	fn iterate_keys_reverse() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -521,7 +498,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
@@ -542,7 +519,7 @@ mod tests {
 	fn iterate_keys_values_forward() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -573,7 +550,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.scan("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
@@ -594,7 +571,7 @@ mod tests {
 	fn iterate_keys_values_reverse() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx = db.begin(true);
+		let mut tx = db.begin();
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -625,7 +602,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.begin(false);
+		let mut tx = db.begin();
 		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
