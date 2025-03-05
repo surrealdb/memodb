@@ -18,6 +18,7 @@ mod commit;
 mod db;
 mod err;
 mod oracle;
+mod semaphore;
 mod tx;
 mod version;
 
