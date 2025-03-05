@@ -181,7 +181,9 @@ where
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
 		// Hint to the scheuler that we shouldn't switch context
-		std::hint::spin_loop();
+		if !self.database.lock {
+			std::hint::spin_loop();
+		}
 		// Insert this transaction into the commit queue
 		self.database.transaction_commit_queue.insert(commit, updates);
 		// Check whether we should have strict serialization
@@ -211,7 +213,9 @@ where
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
 		// Hint to the scheuler that we shouldn't switch context
-		std::hint::spin_loop();
+		if !self.database.lock {
+			std::hint::spin_loop();
+		}
 		// Add this transaction to the merge queue
 		self.database.transaction_merge_queue.insert(version, updates);
 		// Check whether we should have strict serialization
