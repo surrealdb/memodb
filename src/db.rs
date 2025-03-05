@@ -14,20 +14,12 @@
 
 //! This module stores the core in-memory database type.
 
-use crate::commit::Commit;
-use crate::oracle::Oracle;
-use crate::semaphore::Semaphore;
+use crate::inner::Inner;
 use crate::tx::Transaction;
-use crate::version::Version;
-use bplustree::BPlusTree;
-use crossbeam_skiplist::SkipMap;
-use sorted_vec::SortedVec;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::ops::Deref;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 const GC_FREQUENCY: Duration = Duration::from_secs(5);
@@ -39,30 +31,7 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// Whether to ensure that snapshots are guaranteed to be serialized
-	pub(crate) lock: bool,
-	/// The timestamp version oracle
-	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free B+tree datastructure
-	pub(crate) datastore: Arc<BPlusTree<K, SortedVec<Version<V>>>>,
-	/// A count of total transactions grouped by oracle version
-	pub(crate) counter_by_oracle: Arc<SkipMap<u64, AtomicU64>>,
-	/// A count of total transactions grouped by commit id
-	pub(crate) counter_by_commit: Arc<SkipMap<u64, AtomicU64>>,
-	/// The transaction commit queue sequence number
-	pub(crate) transaction_commit: Arc<AtomicU64>,
-	/// The transaction commit queue list of modifications
-	pub(crate) transaction_commit_queue: Arc<SkipMap<u64, Commit<K>>>,
-	/// A semaphore for use when guaranteeing serialized commits
-	pub(crate) transaction_commit_queue_semaphore: Arc<Semaphore>,
-	/// Transaction updates which are committed but not yet applied
-	pub(crate) transaction_merge_queue: Arc<SkipMap<u64, BTreeMap<K, Option<V>>>>,
-	/// A semaphore for use when guaranteeing serialized commits
-	pub(crate) transaction_merge_queue_semaphore: Arc<Semaphore>,
-	/// Specifies whether garbage collection is enabled in the background
-	pub(crate) garbage_collection_enabled: Arc<AtomicBool>,
-	/// Stores a handle to the current garbage collection background thread
-	pub(crate) garbage_collection_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+	pub(crate) inner: Arc<Inner<K, V>>,
 }
 
 impl<K, V> Default for Database<K, V>
@@ -72,18 +41,7 @@ where
 {
 	fn default() -> Self {
 		Database {
-			lock: false,
-			oracle: Arc::new(Oracle::new()),
-			datastore: Arc::new(BPlusTree::new()),
-			counter_by_oracle: Arc::new(SkipMap::new()),
-			counter_by_commit: Arc::new(SkipMap::new()),
-			transaction_commit: Arc::new(AtomicU64::new(0)),
-			transaction_commit_queue: Arc::new(SkipMap::new()),
-			transaction_commit_queue_semaphore: Arc::new(Semaphore::new(1)),
-			transaction_merge_queue: Arc::new(SkipMap::new()),
-			transaction_merge_queue_semaphore: Arc::new(Semaphore::new(1)),
-			garbage_collection_enabled: Arc::new(AtomicBool::new(true)),
-			garbage_collection_handle: Arc::new(Mutex::new(None)),
+			inner: Arc::new(Inner::default()),
 		}
 	}
 }
@@ -95,6 +53,18 @@ where
 {
 	fn drop(&mut self) {
 		self.shutdown();
+	}
+}
+
+impl<K, V> Deref for Database<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	type Target = Inner<K, V>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
 	}
 }
 
@@ -135,9 +105,12 @@ where
 	/// is in the low nanoseconds or microseconds, it still
 	/// is technically a best effort basis.
 	pub fn new_with_besteffort_commits() -> Database<K, V> {
-		let mut db = Database::default();
-		db.lock = false;
-		db
+		Database {
+			inner: Arc::new(Inner {
+				lock: false,
+				..Default::default()
+			}),
+		}
 	}
 
 	/// Create a new transactional in-memory database.
@@ -156,9 +129,12 @@ where
 	/// transactions are guaranteed to always immediately
 	/// see all changes of other committed transactions.
 	pub fn new_with_serialized_commits() -> Database<K, V> {
-		let mut db = Database::default();
-		db.lock = true;
-		db
+		Database {
+			inner: Arc::new(Inner {
+				lock: true,
+				..Default::default()
+			}),
+		}
 	}
 
 	/// Create a new database with inactive garbage collection.
@@ -207,9 +183,9 @@ where
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
 		// Disable garbage collection
-		self.garbage_collection_enabled.store(false, Ordering::SeqCst);
+		self.inner.garbage_collection_enabled.store(false, Ordering::SeqCst);
 		// Wait for the garbage collector thread to exit
-		if let Some(handle) = self.garbage_collection_handle.lock().unwrap().take() {
+		if let Some(handle) = self.inner.garbage_collection_handle.lock().unwrap().take() {
 			handle.join().unwrap();
 		}
 	}
@@ -218,27 +194,24 @@ where
 	fn gc(&self, history: Option<Duration>) {
 		// Get the history duration as nanoseconds
 		let history = history.unwrap_or_default().as_nanos();
-		// Clone the database timestamp oracle
-		let oracle = self.oracle.clone();
-		// Clone the database underlying B+tree
-		let datastore = self.datastore.clone();
-		// Clone the transaction timestamp version counters
-		let transactions = self.counter_by_oracle.clone();
-		// Check whether the garbage collection process is enabled
-		let enabled = self.garbage_collection_enabled.clone();
+		// Clone the underlying datastore inner
+		let db = self.inner.clone();
 		// Spawn a new thread to handle periodic garbage collection
 		let handle = std::thread::spawn(move || {
-			while enabled.load(Ordering::SeqCst) {
+			// Check whether the garbage collection process is enabled
+			while db.garbage_collection_enabled.load(Ordering::SeqCst) {
 				// Wait for a specified time interval
 				std::thread::sleep(GC_FREQUENCY);
 				// Get the current timestamp version
-				let current_ts = oracle.current_timestamp();
+				let now = db.oracle.current_timestamp();
 				// Get the earliest used timestamp version
-				let current_ts = transactions.front().map(|e| *e.key()).unwrap_or(current_ts);
+				let inuse = db.counter_by_oracle.front().map(|e| *e.key());
+				// Fetch the earliest of the inuse or current time
+				let cleanup_ts = inuse.unwrap_or(now);
 				// Get the time before which entries should be removed
-				let cleanup_ts = current_ts.saturating_sub(history as u64);
+				let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
 				// Get a mutable iterator over the tree
-				let mut iter = datastore.raw_iter_mut();
+				let mut iter = db.datastore.raw_iter_mut();
 				// Start at the beginning of the tree
 				iter.seek_to_first();
 				// Iterate over the entire tree
@@ -258,7 +231,7 @@ where
 			}
 		});
 		// Store and track the thread handle
-		*self.garbage_collection_handle.lock().unwrap() = Some(handle);
+		*self.inner.garbage_collection_handle.lock().unwrap() = Some(handle);
 	}
 }
 
