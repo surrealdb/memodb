@@ -16,6 +16,7 @@
 
 use crate::commit::Commit;
 use crate::oracle::Oracle;
+use crate::semaphore::Semaphore;
 use crate::tx::Transaction;
 use crate::version::Version;
 use bplustree::BPlusTree;
@@ -38,6 +39,8 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
+	/// Whether to ensure that snapshots are guaranteed to be serialized
+	pub(crate) lock: bool,
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free B+tree datastructure
@@ -50,8 +53,12 @@ where
 	pub(crate) transaction_commit: Arc<AtomicU64>,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: Arc<SkipMap<u64, Commit<K>>>,
+	/// A semaphore for use when guaranteeing serialized commits
+	pub(crate) transaction_commit_queue_semaphore: Arc<Semaphore>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: Arc<SkipMap<u64, BTreeMap<K, Option<V>>>>,
+	/// A semaphore for use when guaranteeing serialized commits
+	pub(crate) transaction_merge_queue_semaphore: Arc<Semaphore>,
 	/// Specifies whether garbage collection is enabled in the background
 	pub(crate) garbage_collection_enabled: Arc<AtomicBool>,
 	/// Stores a handle to the current garbage collection background thread
@@ -65,13 +72,16 @@ where
 {
 	fn default() -> Self {
 		Database {
+			lock: false,
 			oracle: Arc::new(Oracle::new()),
 			datastore: Arc::new(BPlusTree::new()),
 			counter_by_oracle: Arc::new(SkipMap::new()),
 			counter_by_commit: Arc::new(SkipMap::new()),
 			transaction_commit: Arc::new(AtomicU64::new(0)),
 			transaction_commit_queue: Arc::new(SkipMap::new()),
+			transaction_commit_queue_semaphore: Arc::new(Semaphore::new(1)),
 			transaction_merge_queue: Arc::new(SkipMap::new()),
+			transaction_merge_queue_semaphore: Arc::new(Semaphore::new(1)),
 			garbage_collection_enabled: Arc::new(AtomicBool::new(true)),
 			garbage_collection_handle: Arc::new(Mutex::new(None)),
 		}
@@ -105,6 +115,50 @@ where
 	/// Create a new transactional in-memory database
 	pub fn new() -> Database<K, V> {
 		Database::default()
+	}
+
+	/// Create a new transactional in-memory database.
+	///
+	/// Although transactions are likely to be always
+	/// serialized, and new transactions should always see
+	/// the modifications of older committed transactions
+	/// in some specific scenarios there can be a small
+	/// possibility that some transactions don't immediately
+	/// see the changes of other committed transactions.
+	///
+	/// This is due to the fact that a CPU core may randomly
+	/// switch the context to a new thread after generating
+	/// a new timestamp, but before adding the entries to
+	/// the transaction commit queue in an atomic manner.
+	/// Although the likelihood of this happening is low,
+	/// and although the time within which this can occur
+	/// is in the low nanoseconds or microseconds, it still
+	/// is technically a best effort basis.
+	pub fn new_with_besteffort_commits() -> Database<K, V> {
+		let mut db = Database::default();
+		db.lock = false;
+		db
+	}
+
+	/// Create a new transactional in-memory database.
+	///
+	/// When creating a database using this method, each
+	/// transaction is always guaranteed to be completely
+	/// serialized, with a lock applied for the minimum
+	/// possible amount of time. In this implementation we
+	/// ensure that the 'commit id' and the insertion into
+	/// the transaction commit queue is done atomically by
+	/// surrounding this behaviour with a locked semaphore.
+	/// In addition we ensure that the 'timestamp version'
+	/// and the insertion into the transaction merge queue
+	/// is done atomically by surrounding this behaviour
+	/// with a locked semaphore. This ensures that all
+	/// transactions are guaranteed to always immediately
+	/// see all changes of other committed transactions.
+	pub fn new_with_serialized_commits() -> Database<K, V> {
+		let mut db = Database::default();
+		db.lock = true;
+		db
 	}
 
 	/// Create a new database with inactive garbage collection.
