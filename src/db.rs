@@ -87,56 +87,6 @@ where
 		Database::default()
 	}
 
-	/// Create a new transactional in-memory database.
-	///
-	/// Although transactions are likely to be always
-	/// serialized, and new transactions should always see
-	/// the modifications of older committed transactions
-	/// in some specific scenarios there can be a small
-	/// possibility that some transactions don't immediately
-	/// see the changes of other committed transactions.
-	///
-	/// This is due to the fact that a CPU core may randomly
-	/// switch the context to a new thread after generating
-	/// a new timestamp, but before adding the entries to
-	/// the transaction commit queue in an atomic manner.
-	/// Although the likelihood of this happening is low,
-	/// and although the time within which this can occur
-	/// is in the low nanoseconds or microseconds, it still
-	/// is technically a best effort basis.
-	pub fn new_with_besteffort_commits() -> Database<K, V> {
-		Database {
-			inner: Arc::new(Inner {
-				lock: false,
-				..Default::default()
-			}),
-		}
-	}
-
-	/// Create a new transactional in-memory database.
-	///
-	/// When creating a database using this method, each
-	/// transaction is always guaranteed to be completely
-	/// serialized, with a lock applied for the minimum
-	/// possible amount of time. In this implementation we
-	/// ensure that the 'commit id' and the insertion into
-	/// the transaction commit queue is done atomically by
-	/// surrounding this behaviour with a locked semaphore.
-	/// In addition we ensure that the 'timestamp version'
-	/// and the insertion into the transaction merge queue
-	/// is done atomically by surrounding this behaviour
-	/// with a locked semaphore. This ensures that all
-	/// transactions are guaranteed to always immediately
-	/// see all changes of other committed transactions.
-	pub fn new_with_serialized_commits() -> Database<K, V> {
-		Database {
-			inner: Arc::new(Inner {
-				lock: true,
-				..Default::default()
-			}),
-		}
-	}
-
 	/// Create a new database with inactive garbage collection.
 	///
 	/// This function will create a background thread which

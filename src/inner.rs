@@ -16,7 +16,6 @@
 
 use crate::commit::Commit;
 use crate::oracle::Oracle;
-use crate::semaphore::Semaphore;
 use crate::version::Version;
 use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
@@ -33,8 +32,6 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// Whether to ensure that snapshots are guaranteed to be serialized
-	pub(crate) lock: bool,
 	/// The timestamp version oracle
 	pub(crate) oracle: Oracle,
 	/// The underlying lock-free B+tree datastructure
@@ -47,12 +44,8 @@ where
 	pub(crate) transaction_commit: AtomicU64,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: SkipMap<u64, Commit<K>>,
-	/// A semaphore for use when guaranteeing serialized commits
-	pub(crate) transaction_commit_queue_semaphore: Semaphore,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, BTreeMap<K, Option<V>>>,
-	/// A semaphore for use when guaranteeing serialized commits
-	pub(crate) transaction_merge_queue_semaphore: Semaphore,
 	/// Specifies whether garbage collection is enabled in the background
 	pub(crate) garbage_collection_enabled: AtomicBool,
 	/// Stores a handle to the current garbage collection background thread
@@ -66,16 +59,13 @@ where
 {
 	fn default() -> Self {
 		Inner {
-			lock: false,
 			oracle: Oracle::new(),
 			datastore: BPlusTree::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_commit: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
-			transaction_commit_queue_semaphore: Semaphore::new(1),
 			transaction_merge_queue: SkipMap::new(),
-			transaction_merge_queue_semaphore: Semaphore::new(1),
 			garbage_collection_enabled: AtomicBool::new(true),
 			garbage_collection_handle: Mutex::new(None),
 		}
