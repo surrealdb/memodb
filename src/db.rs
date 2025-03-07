@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-const GC_FREQUENCY: Duration = Duration::from_secs(5);
+const GC_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A transactional in-memory database
 #[derive(Clone)]
@@ -31,7 +31,8 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	pub(crate) inner: Arc<Inner<K, V>>,
+	// The inner strcuture of an Oracle
+	inner: Arc<Inner<K, V>>,
 }
 
 impl<K, V> Default for Database<K, V>
@@ -62,7 +63,6 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	type Target = Inner<K, V>;
-
 	fn deref(&self) -> &Self::Target {
 		&self.inner
 	}
@@ -100,7 +100,7 @@ where
 		// Create the database
 		let db = Self::new();
 		// Start cleanup thread
-		db.gc(None);
+		db.worker_gc(None);
 		// Return the database
 		db
 	}
@@ -120,7 +120,7 @@ where
 		// Create the database
 		let db = Self::new();
 		// Start cleanup thread
-		db.gc(Some(history));
+		db.worker_gc(Some(history));
 		// Return the database
 		db
 	}
@@ -136,12 +136,13 @@ where
 		self.inner.garbage_collection_enabled.store(false, Ordering::SeqCst);
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.inner.garbage_collection_handle.lock().unwrap().take() {
+			handle.thread().unpark();
 			handle.join().unwrap();
 		}
 	}
 
 	/// Start the GC thread after creating the database
-	fn gc(&self, history: Option<Duration>) {
+	fn worker_gc(&self, history: Option<Duration>) {
 		// Get the history duration as nanoseconds
 		let history = history.unwrap_or_default().as_nanos();
 		// Clone the underlying datastore inner
@@ -151,7 +152,7 @@ where
 			// Check whether the garbage collection process is enabled
 			while db.garbage_collection_enabled.load(Ordering::SeqCst) {
 				// Wait for a specified time interval
-				std::thread::sleep(GC_FREQUENCY);
+				std::thread::park_timeout(GC_INTERVAL);
 				// Get the current timestamp version
 				let now = db.oracle.current_timestamp();
 				// Get the earliest used timestamp version
