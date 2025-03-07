@@ -19,14 +19,8 @@ use thiserror::Error;
 /// The errors which can be emitted from a database.
 #[derive(Error, Debug)]
 pub enum Error {
-	#[error("Can not open transaction")]
-	DbError,
-
 	#[error("Transaction is closed")]
 	TxClosed,
-
-	#[error("Transaction is not writable")]
-	TxNotWritable,
 
 	#[error("Key being inserted already exists")]
 	KeyAlreadyExists,
