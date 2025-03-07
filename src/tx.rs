@@ -170,10 +170,14 @@ where
 			done: AtomicBool::new(false),
 			keyset: self.updates.keys().cloned().collect(),
 		};
+		// Acquire the lock, ensuring that serialized transactions
+		let lock = self.database.transaction_commit_queue_lock.write();
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
 		// Insert this transaction into the commit queue
 		self.database.transaction_commit_queue.insert(commit, updates);
+		// Drop the transaction serialization lock
+		std::mem::drop(lock);
 		// Fetch the entry for the current transaction
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
@@ -188,10 +192,14 @@ where
 		}
 		// Clone the transaction modification
 		let updates = self.updates.clone();
+		// Acquire the lock, ensuring that serialized transactions
+		let lock = self.database.transaction_merge_queue_lock.write();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
 		// Add this transaction to the merge queue
 		self.database.transaction_merge_queue.insert(version, updates);
+		// Drop the transaction serialization lock
+		std::mem::drop(lock);
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
@@ -216,10 +224,8 @@ where
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
-		// Fetch the transaction entry in the commit queue
-		let txn = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Mark the transaction as done
-		txn.value().done.store(true, Ordering::SeqCst);
+		entry.value().done.store(true, Ordering::SeqCst);
 		// Continue
 		Ok(())
 	}
@@ -721,8 +727,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Ensure we see committing transactions
+		let lock = self.database.transaction_merge_queue_lock.read();
+		// Fetch the transaction merge queue range
+		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		// Drop the merge queue read lock quickly
+		std::mem::drop(lock);
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+		for entry in iter.rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
@@ -754,8 +766,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Ensure we see committing transactions
+		let lock = self.database.transaction_merge_queue_lock.read();
+		// Fetch the transaction merge queue range
+		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		// Drop the merge queue read lock quickly
+		std::mem::drop(lock);
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+		for entry in iter.rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
@@ -788,9 +806,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Ensure we see committing transactions
+		let lock = self.database.transaction_merge_queue_lock.read();
+		// Fetch the transaction merge queue range
+		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		// Drop the merge queue read lock quickly
+		std::mem::drop(lock);
 		// Check the current entry iteration
-		for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-			// There is a valid merge queue entry
+		for entry in iter.rev() {
 			if !entry.is_removed() {
 				// Check if the entry has a key
 				if let Some(v) = entry.value().get(key.borrow()) {
