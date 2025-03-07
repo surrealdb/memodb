@@ -1307,4 +1307,161 @@ mod tests {
 
 		txn2.commit().unwrap();
 	}
+
+	// G1c: Circular Information Flow (dirty reads)
+	#[test]
+	fn test_anomaly_g1c() {
+		let db = new_db();
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		let mut txn1 = db.begin();
+		let mut txn2 = db.begin();
+
+		assert!(txn1.get(&key1).is_ok());
+		assert!(txn2.get(&key2).is_ok());
+
+		txn1.set(key1, &value3).unwrap();
+		txn2.set(key2, &value4).unwrap();
+
+		assert_eq!(txn1.get(&key2).unwrap().unwrap(), value2);
+		assert_eq!(txn2.get(&key1).unwrap().unwrap(), value1);
+
+		txn1.commit().unwrap();
+		assert!(txn2.commit().is_err());
+	}
+
+	// PMP-Write: Circular Information Flow (dirty reads)
+	#[test]
+	fn test_pmp_write() {
+		let db = new_db();
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+
+		let mut txn1 = db.begin();
+		let mut txn2 = db.begin();
+
+		assert!(txn1.get(&key1).is_ok());
+		txn1.set(key1, &value3).unwrap();
+
+		let range = "k1".."k2";
+		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+
+		txn2.del(key2).unwrap();
+		txn1.commit().unwrap();
+
+		let range = "k1".."k3";
+		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 1);
+		assert_eq!(res[0].1, value1);
+
+		assert!(txn2.commit().is_err());
+	}
+
+	#[test]
+	fn test_g2_item() {
+		let db = new_db();
+		let key1 = "k1";
+		let key2 = "k2";
+		let value1 = "v1";
+		let value2 = "v2";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		let mut txn1 = db.begin();
+		let mut txn2 = db.begin();
+
+		let range = "k1".."k2";
+		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+
+		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		assert_eq!(res.len(), 2);
+		assert_eq!(res[0].1, value1);
+		assert_eq!(res[1].1, value2);
+
+		txn1.set(key1, &value3).unwrap();
+		txn2.set(key2, &value4).unwrap();
+
+		txn1.commit().unwrap();
+
+		assert!(txn2.commit().is_err());
+	}
+
+	#[test]
+	fn test_g2_item_predicate() {
+		let db = new_db();
+
+		let key3 = "k3";
+		let key4 = "k4";
+		let key5 = "k5";
+		let key6 = "k6";
+		let key7 = "k7";
+		let value3 = "v3";
+		let value4 = "v4";
+
+		// inserts into read ranges of already-committed transaction(s) should fail
+		{
+			let mut txn1 = db.begin();
+			let mut txn2 = db.begin();
+
+			let range = "k1".."k4";
+			txn1.scan(range.clone(), None).expect("Scan should succeed");
+			txn2.scan(range.clone(), None).expect("Scan should succeed");
+
+			txn1.set(key3, &value3).unwrap();
+			txn2.set(key4, &value4).unwrap();
+
+			txn1.commit().unwrap();
+
+			assert!(txn2.commit().is_err());
+		}
+
+		// k1, k2, k3 already committed
+		// inserts beyond scan range should pass
+		{
+			let mut txn1 = db.begin();
+			let mut txn2 = db.begin();
+
+			let range = "k1".."k3";
+			txn1.scan(range.clone(), None).expect("Scan should succeed");
+			txn2.scan(range.clone(), None).expect("Scan should succeed");
+
+			txn1.set(key4, &value3).unwrap();
+			txn2.set(key5, &value4).unwrap();
+
+			txn1.commit().unwrap();
+			txn2.commit().unwrap();
+		}
+
+		// k1, k2, k3, k4, k5 already committed
+		// inserts in subset scan ranges should fail
+		{
+			let mut txn1 = db.begin();
+			let mut txn2 = db.begin();
+
+			let range = "k1".."k7";
+			txn1.scan(range.clone(), None).expect("Scan should succeed");
+			let range = "k3".."k7";
+			txn2.scan(range.clone(), None).expect("Scan should succeed");
+
+			txn1.set(key6, &value3).unwrap();
+			txn2.set(key7, &value4).unwrap();
+
+			txn1.commit().unwrap();
+			assert!(txn2.commit().is_err());
+		}
+	}
 }
