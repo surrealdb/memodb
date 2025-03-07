@@ -111,7 +111,7 @@ impl Oracle {
 
 	/// Start the resyncing thread after creating the oracle
 	fn worker_resync(&self) {
-		// Clone the underlying datastore inner
+		// Clone the underlying oracle inner
 		let oracle = self.inner.clone();
 		// Spawn a new thread to handle periodic garbage collection
 		let handle = std::thread::spawn(move || {
