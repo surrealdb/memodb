@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
-/// A transactional in-memory database
+/// The inner structure of the transactional in-memory database
 pub struct Inner<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
