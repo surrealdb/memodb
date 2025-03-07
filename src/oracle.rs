@@ -25,9 +25,9 @@ struct Inner {
 	timestamp: AtomicU64,
 	/// The reference time when this Oracle was synced
 	reference: ArcSwap<(u64, Instant)>,
-	/// Specifies whether garbage collection is enabled in the background
+	/// Specifies whether timestamp syncing is enabled in the background
 	resync_enabled: AtomicBool,
-	/// Stores a handle to the current garbage collection background thread
+	/// Stores a handle to the current timestamp syncing background thread
 	resync_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -113,7 +113,7 @@ impl Oracle {
 	fn worker_resync(&self) {
 		// Clone the underlying oracle inner
 		let oracle = self.inner.clone();
-		// Spawn a new thread to handle periodic garbage collection
+		// Spawn a new thread to handle timestamp resyncing
 		let handle = std::thread::spawn(move || {
 			// Check whether the timestamp resync process is enabled
 			while oracle.resync_enabled.load(Ordering::SeqCst) {
