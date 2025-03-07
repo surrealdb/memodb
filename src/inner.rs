@@ -19,6 +19,7 @@ use crate::oracle::Oracle;
 use crate::version::Version;
 use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
+use parking_lot::RwLock;
 use sorted_vec::SortedVec;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -44,8 +45,12 @@ where
 	pub(crate) transaction_commit: AtomicU64,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: SkipMap<u64, Commit<K>>,
+	/// A read-write lock for use when serializing transaction commits
+	pub(crate) transaction_commit_queue_lock: RwLock<()>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, BTreeMap<K, Option<V>>>,
+	/// A read-write lock for use when serializing transaction commits
+	pub(crate) transaction_merge_queue_lock: RwLock<()>,
 	/// Specifies whether garbage collection is enabled in the background
 	pub(crate) garbage_collection_enabled: AtomicBool,
 	/// Stores a handle to the current garbage collection background thread
@@ -65,7 +70,9 @@ where
 			counter_by_commit: SkipMap::new(),
 			transaction_commit: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
+			transaction_commit_queue_lock: RwLock::new(()),
 			transaction_merge_queue: SkipMap::new(),
+			transaction_merge_queue_lock: RwLock::new(()),
 			garbage_collection_enabled: AtomicBool::new(true),
 			garbage_collection_handle: Mutex::new(None),
 		}
