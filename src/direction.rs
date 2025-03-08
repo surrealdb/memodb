@@ -12,23 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::bool_comparison)]
+//! This module stores the database iteration direction.
 
-mod commit;
-mod db;
-mod direction;
-mod err;
-mod inner;
-mod oracle;
-mod tx;
-mod version;
-
-#[cfg(test)]
-pub(crate) mod kv;
-
-#[doc(inline)]
-pub use self::db::*;
-#[doc(inline)]
-pub use self::err::*;
-#[doc(inline)]
-pub use self::tx::*;
+/// The direction that the iterator should iterate
+pub enum Direction {
+	Forward,
+	Reverse,
+}
