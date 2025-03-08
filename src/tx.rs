@@ -15,6 +15,7 @@
 //! This module stores the database transaction logic.
 
 use crate::commit::Commit;
+use crate::direction::Direction;
 use crate::err::Error;
 use crate::version::Version;
 use crate::Database;
@@ -354,102 +355,47 @@ where
 		Ok(())
 	}
 
-	/// Retrieve a range of keys from the databases
+	/// Retrieve a range of keys from the database
 	pub fn keys<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Prepare result vector
-		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l),
-			None => Vec::new(),
-		};
-		// Compute the range
-		let beg = rng.start.borrow();
-		let end = rng.end.borrow();
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
-		// Seek to the start of the scan range
-		tree_iter.seek(beg);
-		// Get the first items manually
-		let mut tree_next = tree_iter.next();
-		let mut self_next = self_iter.next();
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next, self_next) {
-				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk && tk != sk {
-						// Add this entry if it is not a delete
-						if tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
-							// Check if there is a version prior to this transaction
-							.is_some_and(|v| {
-								// Check if the found entry is a deleted version
-								v.value.is_some()
-							}) {
-							res.push(tk.clone());
-						}
-						tree_next = tree_iter.next();
-					} else {
-						// Advance the tree if the keys match
-						if tk == sk {
-							tree_next = tree_iter.next();
-						}
-						// Add this entry if it is not a delete
-						if sv.clone().is_some() {
-							res.push(sk.clone());
-						}
-						self_next = self_iter.next();
-					}
-				}
-				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
-					// Add this entry if it is not a delete
-					if tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
-						// Check if there is a version prior to this transaction
-						.is_some_and(|v| {
-							// Check if the found entry is a deleted version
-							v.value.is_some()
-						}) {
-						res.push(tk.clone());
-					}
-					tree_next = tree_iter.next();
-				}
-				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
-					// Add this entry if it is not a delete
-					if sv.clone().is_some() {
-						res.push(sk.clone());
-					}
-					self_next = self_iter.next();
-				}
-				// Both iterators are exhausted
-				_ => break,
-			}
-		}
-		// Return result
-		Ok(res)
+		self.keys_any(rng, limit, None, Direction::Forward, self.version)
 	}
 
-	/// Retrieve a range of keys from the databases
+	/// Retrieve a range of keys from the database, in reverse order
 	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.keys_any(rng, limit, None, Direction::Reverse, self.version)
+	}
+
+	/// Retrieve a range of keys and values from the database
+	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Forward, self.version)
+	}
+
+	/// Retrieve a range of keys and values from the database in reverse order
+	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Reverse, self.version)
+	}
+
+	/// Retrieve a range of keys and values from the databases
+	fn keys_any<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		skip: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -465,14 +411,21 @@ where
 		// Compute the range
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
+		// Calculate how many items to skip
+		let mut skip = skip.unwrap_or_default();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
 		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(end);
+		match direction {
+			Direction::Forward => tree_iter.seek(beg),
+			Direction::Reverse => tree_iter.seek_for_prev(end),
+		};
 		// Get the first items manually
-		let mut tree_next = tree_iter.prev();
-		let mut self_next = self_iter.next_back();
+		let (mut tree_next, mut self_next) = match direction {
+			Direction::Forward => (tree_iter.next(), self_iter.next()),
+			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
@@ -486,25 +439,42 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
+							.find(|v| v.version <= version)
 							// Check if there is a version prior to this transaction
 							.is_some_and(|v| {
 								// Check if the found entry is a deleted version
 								v.value.is_some()
 							}) {
-							res.push(tk.clone());
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push(tk.clone());
+							}
 						}
-						tree_next = tree_iter.prev();
+						tree_next = match direction {
+							Direction::Forward => tree_iter.next(),
+							Direction::Reverse => tree_iter.prev(),
+						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
-							tree_next = tree_iter.prev();
+							tree_next = match direction {
+								Direction::Forward => tree_iter.next(),
+								Direction::Reverse => tree_iter.prev(),
+							};
 						}
 						// Add this entry if it is not a delete
 						if sv.clone().is_some() {
-							res.push(sk.clone());
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push(sk.clone());
+							}
 						}
-						self_next = self_iter.next_back();
+						self_next = match direction {
+							Direction::Forward => self_iter.next(),
+							Direction::Reverse => self_iter.next_back(),
+						};
 					}
 				}
 				// Only the left iterator has any items
@@ -516,23 +486,37 @@ where
 						// Reverse iterate through the versions
 						.rev()
 						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
+						.find(|v| v.version <= version)
 						// Check if there is a version prior to this transaction
 						.is_some_and(|v| {
 							// Check if the found entry is a deleted version
 							v.value.is_some()
 						}) {
-						res.push(tk.clone());
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push(tk.clone());
+						}
 					}
-					tree_next = tree_iter.prev();
+					tree_next = match direction {
+						Direction::Forward => tree_iter.next(),
+						Direction::Reverse => tree_iter.prev(),
+					};
 				}
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if sv.clone().is_some() {
-						res.push(sk.clone());
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push(sk.clone());
+						}
 					}
-					self_next = self_iter.next_back();
+					self_next = match direction {
+						Direction::Forward => self_iter.next(),
+						Direction::Reverse => self_iter.next_back(),
+					};
 				}
 				// Both iterators are exhausted
 				_ => break,
@@ -543,7 +527,14 @@ where
 	}
 
 	/// Retrieve a range of keys and values from the databases
-	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	fn scan_any<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		skip: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -559,104 +550,21 @@ where
 		// Compute the range
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
+		// Calculate how many items to skip
+		let mut skip = skip.unwrap_or_default();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
 		let mut self_iter = self.updates.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek(beg);
-		// Get the first items manually
-		let mut tree_next = tree_iter.next();
-		let mut self_next = self_iter.next();
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next, self_next) {
-				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk && tk != sk {
-						// Add this entry if it is not a delete
-						if let Some(v) = tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
-							// Clone the entry prior to this transaction
-							.and_then(|v| v.value.clone())
-						{
-							res.push((tk.clone(), v));
-						}
-						tree_next = tree_iter.next();
-					} else {
-						// Advance the tree if the keys match
-						if tk == sk {
-							tree_next = tree_iter.next();
-						}
-						// Add this entry if it is not a delete
-						if let Some(v) = sv.clone() {
-							res.push((sk.clone(), v));
-						}
-						self_next = self_iter.next();
-					}
-				}
-				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
-					// Add this entry if it is not a delete
-					if let Some(v) = tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
-						// Clone the entry prior to this transaction
-						.and_then(|v| v.value.clone())
-					{
-						res.push((tk.clone(), v));
-					}
-					tree_next = tree_iter.next();
-				}
-				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
-					// Add this entry if it is not a delete
-					if let Some(v) = sv.clone() {
-						res.push((sk.clone(), v));
-					}
-					self_next = self_iter.next();
-				}
-				// Both iterators are exhausted
-				_ => break,
-			}
-		}
-		// Return result
-		Ok(res)
-	}
-
-	/// Retrieve a range of keys and values from the databases in reverse order
-	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
-	where
-		Q: Borrow<K>,
-	{
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Prepare result vector
-		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l),
-			None => Vec::new(),
+		match direction {
+			Direction::Forward => tree_iter.seek(beg),
+			Direction::Reverse => tree_iter.seek_for_prev(end),
 		};
-		// Compute the range
-		let beg = rng.start.borrow();
-		let end = rng.end.borrow();
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
-		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(end);
 		// Get the first items manually
-		let mut tree_next = tree_iter.prev();
-		let mut self_next = self_iter.next_back();
+		let (mut tree_next, mut self_next) = match direction {
+			Direction::Forward => (tree_iter.next(), self_iter.next()),
+			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
@@ -670,23 +578,40 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
+							.find(|v| v.version <= version)
 							// Clone the entry prior to this transaction
 							.and_then(|v| v.value.clone())
 						{
-							res.push((tk.clone(), v));
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push((tk.clone(), v));
+							}
 						}
-						tree_next = tree_iter.prev();
+						tree_next = match direction {
+							Direction::Forward => tree_iter.next(),
+							Direction::Reverse => tree_iter.prev(),
+						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
-							tree_next = tree_iter.prev();
+							tree_next = match direction {
+								Direction::Forward => tree_iter.next(),
+								Direction::Reverse => tree_iter.prev(),
+							};
 						}
 						// Add this entry if it is not a delete
 						if let Some(v) = sv.clone() {
-							res.push((sk.clone(), v));
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push((sk.clone(), v));
+							}
 						}
-						self_next = self_iter.next_back();
+						self_next = match direction {
+							Direction::Forward => self_iter.next(),
+							Direction::Reverse => self_iter.next_back(),
+						};
 					}
 				}
 				// Only the left iterator has any items
@@ -698,21 +623,35 @@ where
 						// Reverse iterate through the versions
 						.rev()
 						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
+						.find(|v| v.version <= version)
 						// Clone the entry prior to this transaction
 						.and_then(|v| v.value.clone())
 					{
-						res.push((tk.clone(), v));
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push((tk.clone(), v));
+						}
 					}
-					tree_next = tree_iter.prev();
+					tree_next = match direction {
+						Direction::Forward => tree_iter.next(),
+						Direction::Reverse => tree_iter.prev(),
+					};
 				}
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = sv.clone() {
-						res.push((sk.clone(), v));
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push((sk.clone(), v));
+						}
 					}
-					self_next = self_iter.next_back();
+					self_next = match direction {
+						Direction::Forward => self_iter.next(),
+						Direction::Reverse => self_iter.next_back(),
+					};
 				}
 				// Both iterators are exhausted
 				_ => break,
