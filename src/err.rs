@@ -28,6 +28,9 @@ pub enum Error {
 	#[error("Value being checked was not correct")]
 	ValNotExpectedValue,
 
+	#[error("Read conflict, retry the transaction")]
+	KeyReadConflict,
+
 	#[error("Write conflict, retry the transaction")]
 	KeyWriteConflict,
 }
