@@ -243,7 +243,7 @@ where
 				}
 			}
 		}
-		// Clone the transaction modification
+		// Clone the transaction modifications
 		let updates = self.writeset.clone();
 		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_merge_queue_lock.write();

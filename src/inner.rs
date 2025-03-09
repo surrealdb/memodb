@@ -24,8 +24,8 @@ use sorted_vec::SortedVec;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Mutex;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// The inner structure of the transactional in-memory database
 pub struct Inner<K, V>
@@ -51,10 +51,12 @@ where
 	pub(crate) transaction_merge_queue: SkipMap<u64, BTreeMap<K, Option<V>>>,
 	/// A read-write lock for use when serializing transaction commits
 	pub(crate) transaction_merge_queue_lock: RwLock<()>,
+	/// The epoch duration to determine how long to store versioned data
+	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
 	/// Specifies whether garbage collection is enabled in the background
 	pub(crate) garbage_collection_enabled: AtomicBool,
 	/// Stores a handle to the current garbage collection background thread
-	pub(crate) garbage_collection_handle: Mutex<Option<JoinHandle<()>>>,
+	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 }
 
 impl<K, V> Default for Inner<K, V>
@@ -73,8 +75,9 @@ where
 			transaction_commit_queue_lock: RwLock::new(()),
 			transaction_merge_queue: SkipMap::new(),
 			transaction_merge_queue_lock: RwLock::new(()),
+			garbage_collection_epoch: RwLock::new(None),
 			garbage_collection_enabled: AtomicBool::new(true),
-			garbage_collection_handle: Mutex::new(None),
+			garbage_collection_handle: RwLock::new(None),
 		}
 	}
 }

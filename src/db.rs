@@ -96,13 +96,13 @@ where
 	/// transactions. Effectively previous versions are cleaned
 	/// up and removed as soon as possible, whilst ensuring
 	/// that transaction snapshots still operate correctly.
-	pub fn new_with_gc() -> Database<K, V> {
-		// Create the database
-		let db = Self::new();
+	pub fn with_gc(self) -> Database<K, V> {
+		// Store the garbage collection epoch
+		*self.garbage_collection_epoch.write() = None;
 		// Start cleanup thread
-		db.worker_gc(None);
+		self.worker_gc();
 		// Return the database
-		db
+		self
 	}
 
 	/// Create a new database with historic garbage collection.
@@ -116,13 +116,13 @@ where
 	/// removed if the transaction entries are older than the
 	/// specified duration, whilst ensuring that transaction
 	/// snapshots still operate correctly.
-	pub fn new_with_gc_history(history: Duration) -> Database<K, V> {
-		// Create the database
-		let db = Self::new();
+	pub fn with_gc_history(self, history: Duration) -> Database<K, V> {
+		// Store the garbage collection epoch
+		*self.garbage_collection_epoch.write() = Some(history);
 		// Start cleanup thread
-		db.worker_gc(Some(history));
+		self.worker_gc();
 		// Return the database
-		db
+		self
 	}
 
 	/// Start a new transaction on this database
@@ -135,54 +135,57 @@ where
 		// Disable garbage collection
 		self.inner.garbage_collection_enabled.store(false, Ordering::SeqCst);
 		// Wait for the garbage collector thread to exit
-		if let Some(handle) = self.inner.garbage_collection_handle.lock().unwrap().take() {
+		if let Some(handle) = self.inner.garbage_collection_handle.write().take() {
 			handle.thread().unpark();
 			handle.join().unwrap();
 		}
 	}
 
 	/// Start the GC thread after creating the database
-	fn worker_gc(&self, history: Option<Duration>) {
-		// Get the history duration as nanoseconds
-		let history = history.unwrap_or_default().as_nanos();
+	fn worker_gc(&self) {
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
-		// Spawn a new thread to handle periodic garbage collection
-		let handle = std::thread::spawn(move || {
-			// Check whether the garbage collection process is enabled
-			while db.garbage_collection_enabled.load(Ordering::SeqCst) {
-				// Wait for a specified time interval
-				std::thread::park_timeout(GC_INTERVAL);
-				// Get the current timestamp version
-				let now = db.oracle.current_timestamp();
-				// Get the earliest used timestamp version
-				let inuse = db.counter_by_oracle.front().map(|e| *e.key());
-				// Fetch the earliest of the inuse or current time
-				let cleanup_ts = inuse.unwrap_or(now);
-				// Get the time before which entries should be removed
-				let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
-				// Get a mutable iterator over the tree
-				let mut iter = db.datastore.raw_iter_mut();
-				// Start at the beginning of the tree
-				iter.seek_to_first();
-				// Iterate over the entire tree
-				while let Some((_, versions)) = iter.next() {
-					// Find the last version with `version < cleanup_ts`
-					if let Some(idx) = versions.iter().rposition(|v| v.version < cleanup_ts) {
-						// Check if the found version is a 'delete'
-						if versions[idx].value.is_none() {
-							// Remove all versions up to and including this version
-							versions.drain(..=idx);
-						} else if idx > 0 {
-							// Remove all versions up to this version
-							versions.drain(..idx);
-						};
+		// Check if a background thread is already running
+		if db.garbage_collection_handle.read().is_none() {
+			// Spawn a new thread to handle periodic garbage collection
+			let handle = std::thread::spawn(move || {
+				// Check whether the garbage collection process is enabled
+				while db.garbage_collection_enabled.load(Ordering::SeqCst) {
+					// Wait for a specified time interval
+					std::thread::park_timeout(GC_INTERVAL);
+					// Get the current timestamp version
+					let now = db.oracle.current_timestamp();
+					// Get the earliest used timestamp version
+					let inuse = db.counter_by_oracle.front().map(|e| *e.key());
+					// Get the garbage collection epoch as nanoseconds
+					let history = db.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+					// Fetch the earliest of the inuse or current time
+					let cleanup_ts = inuse.unwrap_or(now);
+					// Get the time before which entries should be removed
+					let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
+					// Get a mutable iterator over the tree
+					let mut iter = db.datastore.raw_iter_mut();
+					// Start at the beginning of the tree
+					iter.seek_to_first();
+					// Iterate over the entire tree
+					while let Some((_, versions)) = iter.next() {
+						// Find the last version with `version < cleanup_ts`
+						if let Some(idx) = versions.iter().rposition(|v| v.version < cleanup_ts) {
+							// Check if the found version is a 'delete'
+							if versions[idx].value.is_none() {
+								// Remove all versions up to and including this version
+								versions.drain(..=idx);
+							} else if idx > 0 {
+								// Remove all versions up to this version
+								versions.drain(..idx);
+							};
+						}
 					}
 				}
-			}
-		});
-		// Store and track the thread handle
-		*self.inner.garbage_collection_handle.lock().unwrap() = Some(handle);
+			});
+			// Store and track the thread handle
+			*self.inner.garbage_collection_handle.write() = Some(handle);
+		}
 	}
 }
 
