@@ -12,25 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This module stores the database error types.
+//! This module stores the database iteration direction.
 
-use thiserror::Error;
-
-/// The errors which can be emitted from a database.
-#[derive(Error, Debug)]
-pub enum Error {
-	#[error("Transaction is closed")]
-	TxClosed,
-
-	#[error("Key being inserted already exists")]
-	KeyAlreadyExists,
-
-	#[error("Value being checked was not correct")]
-	ValNotExpectedValue,
-
-	#[error("Read conflict, retry the transaction")]
-	KeyReadConflict,
-
-	#[error("Write conflict, retry the transaction")]
-	KeyWriteConflict,
+/// The direction that the iterator should iterate
+pub enum Direction {
+	Forward,
+	Reverse,
 }

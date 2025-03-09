@@ -16,6 +16,7 @@
 
 mod commit;
 mod db;
+mod direction;
 mod err;
 mod inner;
 mod oracle;

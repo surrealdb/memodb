@@ -15,15 +15,24 @@
 //! This module stores the database transaction logic.
 
 use crate::commit::Commit;
+use crate::direction::Direction;
 use crate::err::Error;
 use crate::version::Version;
 use crate::Database;
+use crossbeam_skiplist::SkipMap;
 use sorted_vec::SortedVec;
 use std::borrow::Borrow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The commit behaviour of a database transaction
+pub enum Mode {
+	SnapshotIsolation,
+	SerializableSnapshotIsolation,
+}
 
 /// A serializable snapshot isolated database transaction
 pub struct Transaction<K, V>
@@ -31,14 +40,20 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
+	/// The commit mode of this transaction
+	mode: Mode,
 	/// Is the transaction complete?
 	done: bool,
 	/// The version at which this transaction started
 	commit: u64,
 	/// The version at which this transaction started
 	version: u64,
+	/// The local set of key scans
+	scanset: SkipMap<K, K>,
+	/// The local set of key reads
+	readset: BTreeSet<K>,
 	/// The local set of updates and deletes
-	updates: BTreeMap<K, Option<V>>,
+	writeset: BTreeMap<K, Option<V>>,
 	/// The parent database for this transaction
 	database: Database<K, V>,
 }
@@ -121,12 +136,27 @@ where
 		};
 		// Create the read only transaction
 		Transaction {
+			mode: Mode::SerializableSnapshotIsolation,
 			done: false,
 			commit,
 			version,
-			updates: BTreeMap::new(),
+			scanset: SkipMap::new(),
+			readset: BTreeSet::new(),
+			writeset: BTreeMap::new(),
 			database: db,
 		}
+	}
+
+	/// Ensure this transaction is committed with snapshot isolation guarantees
+	pub fn with_snapshot_isolation(mut self) -> Self {
+		self.mode = Mode::SnapshotIsolation;
+		self
+	}
+
+	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
+	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
+		self.mode = Mode::SerializableSnapshotIsolation;
+		self
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -148,7 +178,7 @@ where
 		// Mark this transaction as done
 		self.done = true;
 		// Clear the transaction entries
-		self.updates.clear();
+		self.writeset.clear();
 		// Continue
 		Ok(())
 	}
@@ -162,15 +192,15 @@ where
 		// Mark this transaction as done
 		self.done = true;
 		// Return immediately if no modifications
-		if self.updates.is_empty() {
+		if self.writeset.is_empty() {
 			return Ok(());
 		}
 		// Clone the transaction modification keyset
 		let updates = Commit {
 			done: AtomicBool::new(false),
-			keyset: self.updates.keys().cloned().collect(),
+			keyset: self.writeset.keys().cloned().collect(),
 		};
-		// Acquire the lock, ensuring that serialized transactions
+		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_commit_queue_lock.write();
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
@@ -182,17 +212,40 @@ where
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
 		for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit) {
-			// A previous transaction has conflicting modifications
+			// A previous transaction has conflicts against writes
 			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
 				// Remove the transaction from the commit queue
 				self.database.transaction_commit_queue.remove(&commit);
 				// Return the error for this transaction
 				return Err(Error::KeyWriteConflict);
 			}
+			// Check if we should check for conflicting read keys
+			if let Mode::SerializableSnapshotIsolation = self.mode {
+				// A previous transaction has conflicts against reads
+				if !tx.value().keyset.is_disjoint(&self.readset) {
+					// Remove the transaction from the commit queue
+					self.database.transaction_commit_queue.remove(&commit);
+					// Return the error for this transaction
+					return Err(Error::KeyReadConflict);
+				}
+				// A previous transaction has conflicts against scans
+				for k in tx.value().keyset.iter() {
+					// Check if this key may be within a scan range
+					if let Some(entry) = self.scanset.upper_bound(Bound::Included(k)) {
+						// Check if the range includes this key
+						if entry.value() > k {
+							// Remove the transaction from the commit queue
+							self.database.transaction_commit_queue.remove(&commit);
+							// Return the error for this transaction
+							return Err(Error::KeyReadConflict);
+						}
+					}
+				}
+			}
 		}
 		// Clone the transaction modification
-		let updates = self.updates.clone();
-		// Acquire the lock, ensuring that serialized transactions
+		let updates = self.writeset.clone();
+		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_merge_queue_lock.write();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
@@ -203,7 +256,7 @@ where
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
-		for (key, value) in std::mem::take(&mut self.updates) {
+		for (key, value) in std::mem::take(&mut self.writeset) {
 			// Check if this key already exists
 			if iter.seek_exact(&key) {
 				// We know it exists, so we can unwrap
@@ -231,7 +284,31 @@ where
 	}
 
 	/// Check if a key exists in the database
-	pub fn exists<Q>(&self, key: Q) -> Result<bool, Error>
+	pub fn exists<Q>(&mut self, key: Q) -> Result<bool, Error>
+	where
+		Q: Borrow<K> + Into<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Check the key
+		let res = match self.writeset.get(key.borrow()) {
+			// The key exists in the writeset
+			Some(_) => true,
+			// Check for the key in the tree
+			None => {
+				let res = self.exists_in_datastore(key.borrow(), self.version);
+				self.readset.insert(key.into());
+				res
+			}
+		};
+		// Return result
+		Ok(res)
+	}
+
+	/// Check if a key exists in the database at a specific version
+	pub fn exists_at_version<Q>(&self, key: Q, version: u64) -> Result<bool, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -240,18 +317,37 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Check the key
-		let res = match self.updates.get(key.borrow()) {
-			// The key exists in the writeset
-			Some(_) => true,
-			// Check for the key in the tree
-			None => self.exists_in_datastore(key.borrow()),
-		};
+		let res = self.exists_in_datastore(key.borrow(), version);
 		// Return result
 		Ok(res)
 	}
 
 	/// Fetch a key from the database
-	pub fn get<Q>(&self, key: Q) -> Result<Option<V>, Error>
+	pub fn get<Q>(&mut self, key: Q) -> Result<Option<V>, Error>
+	where
+		Q: Borrow<K> + Into<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Get the key
+		let res = match self.writeset.get(key.borrow()) {
+			// The key exists in the writeset
+			Some(v) => v.clone(),
+			// Check for the key in the tree
+			None => {
+				let res = self.fetch_in_datastore(key.borrow(), self.version);
+				self.readset.insert(key.into());
+				res
+			}
+		};
+		// Return result
+		Ok(res)
+	}
+
+	/// Fetch a key from the database at a specific version
+	pub fn get_at_version<Q>(&self, key: Q, version: u64) -> Result<Option<V>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -260,12 +356,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Get the key
-		let res = match self.updates.get(key.borrow()) {
-			// The key exists in the writeset
-			Some(v) => v.clone(),
-			// Check for the key in the tree
-			None => self.fetch_in_datastore(key.borrow()),
-		};
+		let res = self.fetch_in_datastore(key.borrow(), version);
 		// Return result
 		Ok(res)
 	}
@@ -280,7 +371,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Set the key
-		self.updates.insert(key.into(), Some(val));
+		self.writeset.insert(key.into(), Some(val));
 		// Return result
 		Ok(())
 	}
@@ -295,8 +386,8 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Set the key
-		match self.exists_in_datastore(key.borrow()) {
-			false => self.updates.insert(key.into(), Some(val)),
+		match self.exists_in_datastore(key.borrow(), self.version) {
+			false => self.writeset.insert(key.into(), Some(val)),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
 		// Return result
@@ -313,8 +404,8 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Set the key
-		match self.equals_in_datastore(key.borrow(), chk) {
-			true => self.updates.insert(key.into(), Some(val)),
+		match self.equals_in_datastore(key.borrow(), chk, self.version) {
+			true => self.writeset.insert(key.into(), Some(val)),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -331,7 +422,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Remove the key
-		self.updates.insert(key.into(), None);
+		self.writeset.insert(key.into(), None);
 		// Return result
 		Ok(())
 	}
@@ -346,110 +437,107 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Remove the key
-		match self.equals_in_datastore(key.borrow(), chk) {
-			true => self.updates.insert(key.into(), None),
+		match self.equals_in_datastore(key.borrow(), chk, self.version) {
+			true => self.writeset.insert(key.into(), None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
 		Ok(())
 	}
 
-	/// Retrieve a range of keys from the databases
+	/// Retrieve a range of keys from the database
 	pub fn keys<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Prepare result vector
-		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l),
-			None => Vec::new(),
-		};
-		// Compute the range
-		let beg = rng.start.borrow();
-		let end = rng.end.borrow();
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
-		// Seek to the start of the scan range
-		tree_iter.seek(beg);
-		// Get the first items manually
-		let mut tree_next = tree_iter.next();
-		let mut self_next = self_iter.next();
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next, self_next) {
-				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk && tk != sk {
-						// Add this entry if it is not a delete
-						if tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
-							// Check if there is a version prior to this transaction
-							.is_some_and(|v| {
-								// Check if the found entry is a deleted version
-								v.value.is_some()
-							}) {
-							res.push(tk.clone());
-						}
-						tree_next = tree_iter.next();
-					} else {
-						// Advance the tree if the keys match
-						if tk == sk {
-							tree_next = tree_iter.next();
-						}
-						// Add this entry if it is not a delete
-						if sv.clone().is_some() {
-							res.push(sk.clone());
-						}
-						self_next = self_iter.next();
-					}
-				}
-				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
-					// Add this entry if it is not a delete
-					if tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
-						// Check if there is a version prior to this transaction
-						.is_some_and(|v| {
-							// Check if the found entry is a deleted version
-							v.value.is_some()
-						}) {
-						res.push(tk.clone());
-					}
-					tree_next = tree_iter.next();
-				}
-				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
-					// Add this entry if it is not a delete
-					if sv.clone().is_some() {
-						res.push(sk.clone());
-					}
-					self_next = self_iter.next();
-				}
-				// Both iterators are exhausted
-				_ => break,
-			}
-		}
-		// Return result
-		Ok(res)
+		self.keys_any(rng, limit, None, Direction::Forward, self.version)
 	}
 
-	/// Retrieve a range of keys from the databases
+	/// Retrieve a range of keys from the database, in reverse order
 	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.keys_any(rng, limit, None, Direction::Reverse, self.version)
+	}
+
+	/// Retrieve a range of keys from the database at a specific version
+	pub fn keys_at_version<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<K>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.keys_any(rng, limit, None, Direction::Forward, version)
+	}
+
+	/// Retrieve a range of keys from the database at a specific version, in reverse order
+	pub fn keys_at_version_reverse<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<K>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.keys_any(rng, limit, None, Direction::Reverse, version)
+	}
+
+	/// Retrieve a range of keys and values from the database
+	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Forward, self.version)
+	}
+
+	/// Retrieve a range of keys and values from the database in reverse order
+	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Reverse, self.version)
+	}
+
+	/// Retrieve a range of keys and values from the database at a specific version
+	pub fn scan_at_version<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Forward, version)
+	}
+
+	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
+	pub fn scan_at_version_reverse<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Reverse, version)
+	}
+
+	/// Retrieve a range of keys and values from the databases
+	fn keys_any<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		skip: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -465,14 +553,30 @@ where
 		// Compute the range
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
+		// Calculate how many items to skip
+		let mut skip = skip.unwrap_or_default();
+		// Add the entry to the scan range set
+		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
+			// Check if the range includes this key
+			if entry.value() < beg || entry.value() < end {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+		} else {
+			self.scanset.insert(beg.clone(), end.clone());
+		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
+		let mut self_iter = self.writeset.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(end);
+		match direction {
+			Direction::Forward => tree_iter.seek(beg),
+			Direction::Reverse => tree_iter.seek_for_prev(end),
+		};
 		// Get the first items manually
-		let mut tree_next = tree_iter.prev();
-		let mut self_next = self_iter.next_back();
+		let (mut tree_next, mut self_next) = match direction {
+			Direction::Forward => (tree_iter.next(), self_iter.next()),
+			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
@@ -486,25 +590,42 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
+							.find(|v| v.version <= version)
 							// Check if there is a version prior to this transaction
 							.is_some_and(|v| {
 								// Check if the found entry is a deleted version
 								v.value.is_some()
 							}) {
-							res.push(tk.clone());
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push(tk.clone());
+							}
 						}
-						tree_next = tree_iter.prev();
+						tree_next = match direction {
+							Direction::Forward => tree_iter.next(),
+							Direction::Reverse => tree_iter.prev(),
+						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
-							tree_next = tree_iter.prev();
+							tree_next = match direction {
+								Direction::Forward => tree_iter.next(),
+								Direction::Reverse => tree_iter.prev(),
+							};
 						}
 						// Add this entry if it is not a delete
 						if sv.clone().is_some() {
-							res.push(sk.clone());
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push(sk.clone());
+							}
 						}
-						self_next = self_iter.next_back();
+						self_next = match direction {
+							Direction::Forward => self_iter.next(),
+							Direction::Reverse => self_iter.next_back(),
+						};
 					}
 				}
 				// Only the left iterator has any items
@@ -516,23 +637,37 @@ where
 						// Reverse iterate through the versions
 						.rev()
 						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
+						.find(|v| v.version <= version)
 						// Check if there is a version prior to this transaction
 						.is_some_and(|v| {
 							// Check if the found entry is a deleted version
 							v.value.is_some()
 						}) {
-						res.push(tk.clone());
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push(tk.clone());
+						}
 					}
-					tree_next = tree_iter.prev();
+					tree_next = match direction {
+						Direction::Forward => tree_iter.next(),
+						Direction::Reverse => tree_iter.prev(),
+					};
 				}
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if sv.clone().is_some() {
-						res.push(sk.clone());
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push(sk.clone());
+						}
 					}
-					self_next = self_iter.next_back();
+					self_next = match direction {
+						Direction::Forward => self_iter.next(),
+						Direction::Reverse => self_iter.next_back(),
+					};
 				}
 				// Both iterators are exhausted
 				_ => break,
@@ -543,7 +678,14 @@ where
 	}
 
 	/// Retrieve a range of keys and values from the databases
-	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	fn scan_any<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		skip: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
@@ -559,104 +701,30 @@ where
 		// Compute the range
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
-		// Seek to the start of the scan range
-		tree_iter.seek(beg);
-		// Get the first items manually
-		let mut tree_next = tree_iter.next();
-		let mut self_next = self_iter.next();
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next, self_next) {
-				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
-					if tk <= sk && tk != sk {
-						// Add this entry if it is not a delete
-						if let Some(v) = tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
-							// Clone the entry prior to this transaction
-							.and_then(|v| v.value.clone())
-						{
-							res.push((tk.clone(), v));
-						}
-						tree_next = tree_iter.next();
-					} else {
-						// Advance the tree if the keys match
-						if tk == sk {
-							tree_next = tree_iter.next();
-						}
-						// Add this entry if it is not a delete
-						if let Some(v) = sv.clone() {
-							res.push((sk.clone(), v));
-						}
-						self_next = self_iter.next();
-					}
-				}
-				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
-					// Add this entry if it is not a delete
-					if let Some(v) = tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
-						// Clone the entry prior to this transaction
-						.and_then(|v| v.value.clone())
-					{
-						res.push((tk.clone(), v));
-					}
-					tree_next = tree_iter.next();
-				}
-				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
-					// Add this entry if it is not a delete
-					if let Some(v) = sv.clone() {
-						res.push((sk.clone(), v));
-					}
-					self_next = self_iter.next();
-				}
-				// Both iterators are exhausted
-				_ => break,
+		// Calculate how many items to skip
+		let mut skip = skip.unwrap_or_default();
+		// Add the entry to the scan range set
+		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
+			// Check if the range includes this key
+			if entry.value() < beg || entry.value() < end {
+				self.scanset.insert(beg.clone(), end.clone());
 			}
+		} else {
+			self.scanset.insert(beg.clone(), end.clone());
 		}
-		// Return result
-		Ok(res)
-	}
-
-	/// Retrieve a range of keys and values from the databases in reverse order
-	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
-	where
-		Q: Borrow<K>,
-	{
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Prepare result vector
-		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l),
-			None => Vec::new(),
-		};
-		// Compute the range
-		let beg = rng.start.borrow();
-		let end = rng.end.borrow();
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
+		let mut self_iter = self.writeset.range(beg..end);
 		// Seek to the start of the scan range
-		tree_iter.seek_for_prev(end);
+		match direction {
+			Direction::Forward => tree_iter.seek(beg),
+			Direction::Reverse => tree_iter.seek_for_prev(end),
+		};
 		// Get the first items manually
-		let mut tree_next = tree_iter.prev();
-		let mut self_next = self_iter.next_back();
+		let (mut tree_next, mut self_next) = match direction {
+			Direction::Forward => (tree_iter.next(), self_iter.next()),
+			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
 			match (tree_next, self_next) {
@@ -670,23 +738,40 @@ where
 							// Reverse iterate through the versions
 							.rev()
 							// Get the version prior to this transaction
-							.find(|v| v.version <= self.version)
+							.find(|v| v.version <= version)
 							// Clone the entry prior to this transaction
 							.and_then(|v| v.value.clone())
 						{
-							res.push((tk.clone(), v));
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push((tk.clone(), v));
+							}
 						}
-						tree_next = tree_iter.prev();
+						tree_next = match direction {
+							Direction::Forward => tree_iter.next(),
+							Direction::Reverse => tree_iter.prev(),
+						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
-							tree_next = tree_iter.prev();
+							tree_next = match direction {
+								Direction::Forward => tree_iter.next(),
+								Direction::Reverse => tree_iter.prev(),
+							};
 						}
 						// Add this entry if it is not a delete
 						if let Some(v) = sv.clone() {
-							res.push((sk.clone(), v));
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res.push((sk.clone(), v));
+							}
 						}
-						self_next = self_iter.next_back();
+						self_next = match direction {
+							Direction::Forward => self_iter.next(),
+							Direction::Reverse => self_iter.next_back(),
+						};
 					}
 				}
 				// Only the left iterator has any items
@@ -698,21 +783,35 @@ where
 						// Reverse iterate through the versions
 						.rev()
 						// Get the version prior to this transaction
-						.find(|v| v.version <= self.version)
+						.find(|v| v.version <= version)
 						// Clone the entry prior to this transaction
 						.and_then(|v| v.value.clone())
 					{
-						res.push((tk.clone(), v));
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push((tk.clone(), v));
+						}
 					}
-					tree_next = tree_iter.prev();
+					tree_next = match direction {
+						Direction::Forward => tree_iter.next(),
+						Direction::Reverse => tree_iter.prev(),
+					};
 				}
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
 					if let Some(v) = sv.clone() {
-						res.push((sk.clone(), v));
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res.push((sk.clone(), v));
+						}
 					}
-					self_next = self_iter.next_back();
+					self_next = match direction {
+						Direction::Forward => self_iter.next(),
+						Direction::Reverse => self_iter.next_back(),
+					};
 				}
 				// Both iterators are exhausted
 				_ => break,
@@ -723,14 +822,14 @@ where
 	}
 
 	/// Fetch a key if it exists in the datastore only
-	fn fetch_in_datastore<Q>(&self, key: Q) -> Option<V>
+	fn fetch_in_datastore<Q>(&self, key: Q, version: u64) -> Option<V>
 	where
 		Q: Borrow<K>,
 	{
 		// Ensure we see committing transactions
 		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Drop the merge queue read lock quickly
 		std::mem::drop(lock);
 		// Check the current entry iteration
@@ -752,7 +851,7 @@ where
 					// Reverse iterate through the versions
 					.rev()
 					// Get the version prior to this transaction
-					.find(|v| v.version <= self.version)
+					.find(|v| v.version <= version)
 					// Return just the entry value
 					.and_then(|v| v.value.clone())
 			})
@@ -762,14 +861,14 @@ where
 	}
 
 	/// Check if a key exists in the datastore only
-	fn exists_in_datastore<Q>(&self, key: Q) -> bool
+	fn exists_in_datastore<Q>(&self, key: Q, version: u64) -> bool
 	where
 		Q: Borrow<K>,
 	{
 		// Ensure we see committing transactions
 		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Drop the merge queue read lock quickly
 		std::mem::drop(lock);
 		// Check the current entry iteration
@@ -791,7 +890,7 @@ where
 					// Reverse iterate through the versions
 					.rev()
 					// Get the version prior to this transaction
-					.find(|v| v.version <= self.version)
+					.find(|v| v.version <= version)
 					// Check if there is a version prior to this transaction
 					.is_some_and(|v| {
 						// Check if the found entry is a deleted version
@@ -802,14 +901,14 @@ where
 	}
 
 	/// Check if a key equals a value in the datastore only
-	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>) -> bool
+	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>, version: u64) -> bool
 	where
 		Q: Borrow<K>,
 	{
 		// Ensure we see committing transactions
 		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Drop the merge queue read lock quickly
 		std::mem::drop(lock);
 		// Check the current entry iteration
@@ -831,7 +930,7 @@ where
 					// Reverse iterate through the versions
 					.rev()
 					// Get the version prior to this transaction
-					.find(|v| v.version <= self.version)
+					.find(|v| v.version <= version)
 					// Return just the entry value
 					.and_then(|v| v.value.clone())
 			})
@@ -882,11 +981,11 @@ mod tests {
 	}
 
 	#[test]
-	fn mvcc_conflicting_read_keys_should_succeed() {
+	fn mvcc_si_conflicting_read_keys_should_succeed() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
-		let mut tx2 = db.begin();
+		let mut tx1 = db.begin().with_snapshot_isolation();
+		let mut tx2 = db.begin().with_snapshot_isolation();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -895,6 +994,22 @@ mod tests {
 		assert!(tx2.get("key1").unwrap().is_none());
 		tx2.set("key2", "value2").unwrap();
 		assert!(tx2.commit().is_ok());
+	}
+
+	#[test]
+	fn mvcc_ssi_conflicting_read_keys_should_error() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin().with_serializable_snapshot_isolation();
+		let mut tx2 = db.begin().with_serializable_snapshot_isolation();
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_err());
 	}
 
 	#[test]
@@ -1220,7 +1335,7 @@ mod tests {
 		}
 
 		{
-			let txn3 = db.begin();
+			let mut txn3 = db.begin();
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value3);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1261,7 +1376,7 @@ mod tests {
 		}
 
 		{
-			let txn3 = db.begin();
+			let mut txn3 = db.begin();
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value1);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1463,14 +1578,14 @@ mod tests {
 		let mut txn1 = db.begin();
 		let mut txn2 = db.begin();
 
-		assert!(txn1.get(&key1).is_ok());
-		assert!(txn2.get(&key2).is_ok());
+		assert!(txn1.get(key1).is_ok());
+		assert!(txn2.get(key2).is_ok());
 
 		txn1.set(key1, &value3).unwrap();
 		txn2.set(key2, &value4).unwrap();
 
-		assert_eq!(txn1.get(&key2).unwrap().unwrap(), value2);
-		assert_eq!(txn2.get(&key1).unwrap().unwrap(), value1);
+		assert_eq!(txn1.get(key2).unwrap().unwrap(), value2);
+		assert_eq!(txn2.get(key1).unwrap().unwrap(), value1);
 
 		txn1.commit().unwrap();
 		assert!(txn2.commit().is_err());
@@ -1489,7 +1604,7 @@ mod tests {
 		let mut txn1 = db.begin();
 		let mut txn2 = db.begin();
 
-		assert!(txn1.get(&key1).is_ok());
+		assert!(txn1.get(key1).is_ok());
 		txn1.set(key1, &value3).unwrap();
 
 		let range = "k1".."k2";
