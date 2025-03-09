@@ -171,7 +171,7 @@ where
 			done: AtomicBool::new(false),
 			keyset: self.updates.keys().cloned().collect(),
 		};
-		// Acquire the lock, ensuring that serialized transactions
+		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_commit_queue_lock.write();
 		// Increase the transaction commit queue number
 		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
@@ -193,7 +193,7 @@ where
 		}
 		// Clone the transaction modification
 		let updates = self.updates.clone();
-		// Acquire the lock, ensuring that serialized transactions
+		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_merge_queue_lock.write();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
@@ -245,8 +245,23 @@ where
 			// The key exists in the writeset
 			Some(_) => true,
 			// Check for the key in the tree
-			None => self.exists_in_datastore(key.borrow()),
+			None => self.exists_in_datastore(key.borrow(), self.version),
 		};
+		// Return result
+		Ok(res)
+	}
+
+	/// Check if a key exists in the database at a specific version
+	pub fn exists_at_version<Q>(&self, key: Q, version: u64) -> Result<bool, Error>
+	where
+		Q: Borrow<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Check the key
+		let res = self.exists_in_datastore(key.borrow(), version);
 		// Return result
 		Ok(res)
 	}
@@ -265,8 +280,23 @@ where
 			// The key exists in the writeset
 			Some(v) => v.clone(),
 			// Check for the key in the tree
-			None => self.fetch_in_datastore(key.borrow()),
+			None => self.fetch_in_datastore(key.borrow(), self.version),
 		};
+		// Return result
+		Ok(res)
+	}
+
+	/// Fetch a key from the database at a specific version
+	pub fn get_at_version<Q>(&self, key: Q, version: u64) -> Result<Option<V>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Get the key
+		let res = self.fetch_in_datastore(key.borrow(), version);
 		// Return result
 		Ok(res)
 	}
@@ -296,7 +326,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Set the key
-		match self.exists_in_datastore(key.borrow()) {
+		match self.exists_in_datastore(key.borrow(), self.version) {
 			false => self.updates.insert(key.into(), Some(val)),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
@@ -314,7 +344,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Set the key
-		match self.equals_in_datastore(key.borrow(), chk) {
+		match self.equals_in_datastore(key.borrow(), chk, self.version) {
 			true => self.updates.insert(key.into(), Some(val)),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
@@ -347,7 +377,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Remove the key
-		match self.equals_in_datastore(key.borrow(), chk) {
+		match self.equals_in_datastore(key.borrow(), chk, self.version) {
 			true => self.updates.insert(key.into(), None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
@@ -371,6 +401,32 @@ where
 		self.keys_any(rng, limit, None, Direction::Reverse, self.version)
 	}
 
+	/// Retrieve a range of keys from the database at a specific version
+	pub fn keys_at_version<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<K>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.keys_any(rng, limit, None, Direction::Forward, version)
+	}
+
+	/// Retrieve a range of keys from the database at a specific version, in reverse order
+	pub fn keys_at_version_reverse<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<K>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.keys_any(rng, limit, None, Direction::Reverse, version)
+	}
+
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
 	where
@@ -385,6 +441,32 @@ where
 		Q: Borrow<K>,
 	{
 		self.scan_any(rng, limit, None, Direction::Reverse, self.version)
+	}
+
+	/// Retrieve a range of keys and values from the database at a specific version
+	pub fn scan_at_version<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Forward, version)
+	}
+
+	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
+	pub fn scan_at_version_reverse<Q>(
+		&self,
+		rng: Range<Q>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(K, V)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_any(rng, limit, None, Direction::Reverse, version)
 	}
 
 	/// Retrieve a range of keys and values from the databases
@@ -662,14 +744,14 @@ where
 	}
 
 	/// Fetch a key if it exists in the datastore only
-	fn fetch_in_datastore<Q>(&self, key: Q) -> Option<V>
+	fn fetch_in_datastore<Q>(&self, key: Q, version: u64) -> Option<V>
 	where
 		Q: Borrow<K>,
 	{
 		// Ensure we see committing transactions
 		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Drop the merge queue read lock quickly
 		std::mem::drop(lock);
 		// Check the current entry iteration
@@ -691,7 +773,7 @@ where
 					// Reverse iterate through the versions
 					.rev()
 					// Get the version prior to this transaction
-					.find(|v| v.version <= self.version)
+					.find(|v| v.version <= version)
 					// Return just the entry value
 					.and_then(|v| v.value.clone())
 			})
@@ -701,14 +783,14 @@ where
 	}
 
 	/// Check if a key exists in the datastore only
-	fn exists_in_datastore<Q>(&self, key: Q) -> bool
+	fn exists_in_datastore<Q>(&self, key: Q, version: u64) -> bool
 	where
 		Q: Borrow<K>,
 	{
 		// Ensure we see committing transactions
 		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Drop the merge queue read lock quickly
 		std::mem::drop(lock);
 		// Check the current entry iteration
@@ -730,7 +812,7 @@ where
 					// Reverse iterate through the versions
 					.rev()
 					// Get the version prior to this transaction
-					.find(|v| v.version <= self.version)
+					.find(|v| v.version <= version)
 					// Check if there is a version prior to this transaction
 					.is_some_and(|v| {
 						// Check if the found entry is a deleted version
@@ -741,14 +823,14 @@ where
 	}
 
 	/// Check if a key equals a value in the datastore only
-	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>) -> bool
+	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>, version: u64) -> bool
 	where
 		Q: Borrow<K>,
 	{
 		// Ensure we see committing transactions
 		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=self.version);
+		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Drop the merge queue read lock quickly
 		std::mem::drop(lock);
 		// Check the current entry iteration
@@ -770,7 +852,7 @@ where
 					// Reverse iterate through the versions
 					.rev()
 					// Get the version prior to this transaction
-					.find(|v| v.version <= self.version)
+					.find(|v| v.version <= version)
 					// Return just the entry value
 					.and_then(|v| v.value.clone())
 			})
