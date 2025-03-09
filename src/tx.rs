@@ -231,7 +231,7 @@ where
 				// A previous transaction has conflicts against scans
 				for k in tx.value().keyset.iter() {
 					// Check if this key may be within a scan range
-					if let Some(entry) = self.scanset.upper_bound(Bound::Included(&k)) {
+					if let Some(entry) = self.scanset.upper_bound(Bound::Included(k)) {
 						// Check if the range includes this key
 						if entry.value() > k {
 							// Remove the transaction from the commit queue
