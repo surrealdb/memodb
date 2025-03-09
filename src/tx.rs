@@ -997,7 +997,7 @@ mod tests {
 	}
 
 	#[test]
-	fn mvcc_ssi_conflicting_read_keys_should_succeed() {
+	fn mvcc_ssi_conflicting_read_keys_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
 		let mut tx1 = db.begin().with_serializable_snapshot_isolation();
