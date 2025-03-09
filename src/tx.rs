@@ -19,12 +19,20 @@ use crate::direction::Direction;
 use crate::err::Error;
 use crate::version::Version;
 use crate::Database;
+use crossbeam_skiplist::SkipMap;
 use sorted_vec::SortedVec;
 use std::borrow::Borrow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The commit behaviour of a database transaction
+pub enum Mode {
+	SnapshotIsolation,
+	SerializableSnapshotIsolation,
+}
 
 /// A serializable snapshot isolated database transaction
 pub struct Transaction<K, V>
@@ -32,14 +40,20 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
+	/// The commit mode of this transaction
+	mode: Mode,
 	/// Is the transaction complete?
 	done: bool,
 	/// The version at which this transaction started
 	commit: u64,
 	/// The version at which this transaction started
 	version: u64,
+	/// The local set of key scans
+	scanset: SkipMap<K, K>,
+	/// The local set of key reads
+	readset: BTreeSet<K>,
 	/// The local set of updates and deletes
-	updates: BTreeMap<K, Option<V>>,
+	writeset: BTreeMap<K, Option<V>>,
 	/// The parent database for this transaction
 	database: Database<K, V>,
 }
@@ -122,12 +136,27 @@ where
 		};
 		// Create the read only transaction
 		Transaction {
+			mode: Mode::SerializableSnapshotIsolation,
 			done: false,
 			commit,
 			version,
-			updates: BTreeMap::new(),
+			scanset: SkipMap::new(),
+			readset: BTreeSet::new(),
+			writeset: BTreeMap::new(),
 			database: db,
 		}
+	}
+
+	/// Ensure this transaction is committed with snapshot isolation guarantees
+	pub fn with_snapshot_isolation(mut self) -> Self {
+		self.mode = Mode::SnapshotIsolation;
+		self
+	}
+
+	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
+	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
+		self.mode = Mode::SerializableSnapshotIsolation;
+		self
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -149,7 +178,7 @@ where
 		// Mark this transaction as done
 		self.done = true;
 		// Clear the transaction entries
-		self.updates.clear();
+		self.writeset.clear();
 		// Continue
 		Ok(())
 	}
@@ -163,13 +192,13 @@ where
 		// Mark this transaction as done
 		self.done = true;
 		// Return immediately if no modifications
-		if self.updates.is_empty() {
+		if self.writeset.is_empty() {
 			return Ok(());
 		}
 		// Clone the transaction modification keyset
 		let updates = Commit {
 			done: AtomicBool::new(false),
-			keyset: self.updates.keys().cloned().collect(),
+			keyset: self.writeset.keys().cloned().collect(),
 		};
 		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_commit_queue_lock.write();
@@ -183,16 +212,39 @@ where
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
 		for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit) {
-			// A previous transaction has conflicting modifications
+			// A previous transaction has conflicts against writes
 			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
 				// Remove the transaction from the commit queue
 				self.database.transaction_commit_queue.remove(&commit);
 				// Return the error for this transaction
 				return Err(Error::KeyWriteConflict);
 			}
+			// Check if we should check for conflicting read keys
+			if let Mode::SerializableSnapshotIsolation = self.mode {
+				// A previous transaction has conflicts against reads
+				if !tx.value().keyset.is_disjoint(&self.readset) {
+					// Remove the transaction from the commit queue
+					self.database.transaction_commit_queue.remove(&commit);
+					// Return the error for this transaction
+					return Err(Error::KeyReadConflict);
+				}
+				// A previous transaction has conflicts against scans
+				for k in tx.value().keyset.iter() {
+					// Check if this key may be within a scan range
+					if let Some(entry) = self.scanset.upper_bound(Bound::Included(&k)) {
+						// Check if the range includes this key
+						if entry.value() > k {
+							// Remove the transaction from the commit queue
+							self.database.transaction_commit_queue.remove(&commit);
+							// Return the error for this transaction
+							return Err(Error::KeyReadConflict);
+						}
+					}
+				}
+			}
 		}
 		// Clone the transaction modification
-		let updates = self.updates.clone();
+		let updates = self.writeset.clone();
 		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_merge_queue_lock.write();
 		// Increase the datastore sequence number
@@ -204,7 +256,7 @@ where
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
-		for (key, value) in std::mem::take(&mut self.updates) {
+		for (key, value) in std::mem::take(&mut self.writeset) {
 			// Check if this key already exists
 			if iter.seek_exact(&key) {
 				// We know it exists, so we can unwrap
@@ -232,20 +284,24 @@ where
 	}
 
 	/// Check if a key exists in the database
-	pub fn exists<Q>(&self, key: Q) -> Result<bool, Error>
+	pub fn exists<Q>(&mut self, key: Q) -> Result<bool, Error>
 	where
-		Q: Borrow<K>,
+		Q: Borrow<K> + Into<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Check the key
-		let res = match self.updates.get(key.borrow()) {
+		let res = match self.writeset.get(key.borrow()) {
 			// The key exists in the writeset
 			Some(_) => true,
 			// Check for the key in the tree
-			None => self.exists_in_datastore(key.borrow(), self.version),
+			None => {
+				let res = self.exists_in_datastore(key.borrow(), self.version);
+				self.readset.insert(key.into());
+				res
+			}
 		};
 		// Return result
 		Ok(res)
@@ -267,20 +323,24 @@ where
 	}
 
 	/// Fetch a key from the database
-	pub fn get<Q>(&self, key: Q) -> Result<Option<V>, Error>
+	pub fn get<Q>(&mut self, key: Q) -> Result<Option<V>, Error>
 	where
-		Q: Borrow<K>,
+		Q: Borrow<K> + Into<K>,
 	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
 		// Get the key
-		let res = match self.updates.get(key.borrow()) {
+		let res = match self.writeset.get(key.borrow()) {
 			// The key exists in the writeset
 			Some(v) => v.clone(),
 			// Check for the key in the tree
-			None => self.fetch_in_datastore(key.borrow(), self.version),
+			None => {
+				let res = self.fetch_in_datastore(key.borrow(), self.version);
+				self.readset.insert(key.into());
+				res
+			}
 		};
 		// Return result
 		Ok(res)
@@ -311,7 +371,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Set the key
-		self.updates.insert(key.into(), Some(val));
+		self.writeset.insert(key.into(), Some(val));
 		// Return result
 		Ok(())
 	}
@@ -327,7 +387,7 @@ where
 		}
 		// Set the key
 		match self.exists_in_datastore(key.borrow(), self.version) {
-			false => self.updates.insert(key.into(), Some(val)),
+			false => self.writeset.insert(key.into(), Some(val)),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
 		// Return result
@@ -345,7 +405,7 @@ where
 		}
 		// Set the key
 		match self.equals_in_datastore(key.borrow(), chk, self.version) {
-			true => self.updates.insert(key.into(), Some(val)),
+			true => self.writeset.insert(key.into(), Some(val)),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -362,7 +422,7 @@ where
 			return Err(Error::TxClosed);
 		}
 		// Remove the key
-		self.updates.insert(key.into(), None);
+		self.writeset.insert(key.into(), None);
 		// Return result
 		Ok(())
 	}
@@ -378,7 +438,7 @@ where
 		}
 		// Remove the key
 		match self.equals_in_datastore(key.borrow(), chk, self.version) {
-			true => self.updates.insert(key.into(), None),
+			true => self.writeset.insert(key.into(), None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -495,9 +555,18 @@ where
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
+		// Add the entry to the scan range set
+		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
+			// Check if the range includes this key
+			if entry.value() < beg || entry.value() < end {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+		} else {
+			self.scanset.insert(beg.clone(), end.clone());
+		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
+		let mut self_iter = self.writeset.range(beg..end);
 		// Seek to the start of the scan range
 		match direction {
 			Direction::Forward => tree_iter.seek(beg),
@@ -634,9 +703,18 @@ where
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
+		// Add the entry to the scan range set
+		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
+			// Check if the range includes this key
+			if entry.value() < beg || entry.value() < end {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+		} else {
+			self.scanset.insert(beg.clone(), end.clone());
+		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
-		let mut self_iter = self.updates.range(beg..end);
+		let mut self_iter = self.writeset.range(beg..end);
 		// Seek to the start of the scan range
 		match direction {
 			Direction::Forward => tree_iter.seek(beg),
@@ -903,11 +981,11 @@ mod tests {
 	}
 
 	#[test]
-	fn mvcc_conflicting_read_keys_should_succeed() {
+	fn mvcc_si_conflicting_read_keys_should_succeed() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
-		let mut tx2 = db.begin();
+		let mut tx1 = db.begin().with_snapshot_isolation();
+		let mut tx2 = db.begin().with_snapshot_isolation();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -916,6 +994,22 @@ mod tests {
 		assert!(tx2.get("key1").unwrap().is_none());
 		tx2.set("key2", "value2").unwrap();
 		assert!(tx2.commit().is_ok());
+	}
+
+	#[test]
+	fn mvcc_ssi_conflicting_read_keys_should_succeed() {
+		let db: Database<&str, &str> = new();
+		// ----------
+		let mut tx1 = db.begin().with_serializable_snapshot_isolation();
+		let mut tx2 = db.begin().with_serializable_snapshot_isolation();
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(tx2.commit().is_err());
 	}
 
 	#[test]
@@ -1100,7 +1194,7 @@ mod tests {
 		}
 
 		{
-			let txn3 = db.begin();
+			let mut txn3 = db.begin();
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value3);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1141,7 +1235,7 @@ mod tests {
 		}
 
 		{
-			let txn3 = db.begin();
+			let mut txn3 = db.begin();
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value1);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1343,14 +1437,14 @@ mod tests {
 		let mut txn1 = db.begin();
 		let mut txn2 = db.begin();
 
-		assert!(txn1.get(&key1).is_ok());
-		assert!(txn2.get(&key2).is_ok());
+		assert!(txn1.get(key1).is_ok());
+		assert!(txn2.get(key2).is_ok());
 
 		txn1.set(key1, &value3).unwrap();
 		txn2.set(key2, &value4).unwrap();
 
-		assert_eq!(txn1.get(&key2).unwrap().unwrap(), value2);
-		assert_eq!(txn2.get(&key1).unwrap().unwrap(), value1);
+		assert_eq!(txn1.get(key2).unwrap().unwrap(), value2);
+		assert_eq!(txn2.get(key1).unwrap().unwrap(), value1);
 
 		txn1.commit().unwrap();
 		assert!(txn2.commit().is_err());
@@ -1369,7 +1463,7 @@ mod tests {
 		let mut txn1 = db.begin();
 		let mut txn2 = db.begin();
 
-		assert!(txn1.get(&key1).is_ok());
+		assert!(txn1.get(key1).is_ok());
 		txn1.set(key1, &value3).unwrap();
 
 		let range = "k1".."k2";
