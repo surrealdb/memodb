@@ -951,8 +951,8 @@ mod tests {
 	fn mvcc_non_conflicting_keys_should_succeed() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
-		let mut tx2 = db.begin();
+		let mut tx1 = db.transaction();
+		let mut tx2 = db.transaction();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -967,8 +967,8 @@ mod tests {
 	fn mvcc_conflicting_blind_writes_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
-		let mut tx2 = db.begin();
+		let mut tx1 = db.transaction();
+		let mut tx2 = db.transaction();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -984,8 +984,8 @@ mod tests {
 	fn mvcc_si_conflicting_read_keys_should_succeed() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin().with_snapshot_isolation();
-		let mut tx2 = db.begin().with_snapshot_isolation();
+		let mut tx1 = db.transaction().with_snapshot_isolation();
+		let mut tx2 = db.transaction().with_snapshot_isolation();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1000,8 +1000,8 @@ mod tests {
 	fn mvcc_ssi_conflicting_read_keys_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin().with_serializable_snapshot_isolation();
-		let mut tx2 = db.begin().with_serializable_snapshot_isolation();
+		let mut tx1 = db.transaction().with_serializable_snapshot_isolation();
+		let mut tx2 = db.transaction().with_serializable_snapshot_isolation();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1016,8 +1016,8 @@ mod tests {
 	fn mvcc_conflicting_write_keys_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
-		let mut tx2 = db.begin();
+		let mut tx1 = db.transaction();
+		let mut tx2 = db.transaction();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1032,12 +1032,12 @@ mod tests {
 	fn mvcc_conflicting_read_deleted_keys_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
+		let mut tx1 = db.transaction();
 		tx1.set("key", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		// ----------
-		let mut tx2 = db.begin();
-		let mut tx3 = db.begin();
+		let mut tx2 = db.transaction();
+		let mut tx3 = db.transaction();
 		// ----------
 		assert!(tx2.get("key").unwrap().is_some());
 		tx2.del("key").unwrap();
@@ -1052,12 +1052,12 @@ mod tests {
 	fn mvcc_scan_conflicting_write_keys_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
+		let mut tx1 = db.transaction();
 		tx1.set("key1", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		// ----------
-		let mut tx2 = db.begin();
-		let mut tx3 = db.begin();
+		let mut tx2 = db.transaction();
+		let mut tx3 = db.transaction();
 		// ----------
 		tx2.set("key1", "value4").unwrap();
 		tx2.set("key2", "value2").unwrap();
@@ -1077,12 +1077,12 @@ mod tests {
 	fn mvcc_scan_conflicting_read_deleted_keys_should_error() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
+		let mut tx1 = db.transaction();
 		tx1.set("key1", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		// ----------
-		let mut tx2 = db.begin();
-		let mut tx3 = db.begin();
+		let mut tx2 = db.transaction();
+		let mut tx3 = db.transaction();
 		// ----------
 		tx2.del("key1").unwrap();
 		assert!(tx2.commit().is_ok());
@@ -1101,20 +1101,20 @@ mod tests {
 	fn mvcc_transaction_queue_correctness() {
 		let db: Database<&str, &str> = new();
 		// ----------
-		let mut tx1 = db.begin();
+		let mut tx1 = db.transaction();
 		tx1.set("key1", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		std::mem::drop(tx1);
 		// ----------
-		let mut tx2 = db.begin();
+		let mut tx2 = db.transaction();
 		tx2.set("key2", "value2").unwrap();
 		assert!(tx2.commit().is_ok());
 		std::mem::drop(tx2);
 		// ----------
-		let mut tx3 = db.begin();
+		let mut tx3 = db.transaction();
 		tx3.set("key", "value").unwrap();
 		// ----------
-		let mut tx4 = db.begin();
+		let mut tx4 = db.transaction();
 		tx4.set("key", "value").unwrap();
 		// ----------
 		assert!(tx3.commit().is_ok());
@@ -1122,10 +1122,10 @@ mod tests {
 		std::mem::drop(tx3);
 		std::mem::drop(tx4);
 		// ----------
-		let mut tx5 = db.begin();
+		let mut tx5 = db.transaction();
 		tx5.set("key", "other").unwrap();
 		// ----------
-		let mut tx6 = db.begin();
+		let mut tx6 = db.transaction();
 		tx6.set("key", "other").unwrap();
 		// ----------
 		assert!(tx5.commit().is_ok());
@@ -1133,10 +1133,10 @@ mod tests {
 		std::mem::drop(tx5);
 		std::mem::drop(tx6);
 		// ----------
-		let mut tx7 = db.begin();
+		let mut tx7 = db.transaction();
 		tx7.set("key", "change").unwrap();
 		// ----------
-		let mut tx8 = db.begin();
+		let mut tx8 = db.transaction();
 		tx8.set("key", "change").unwrap();
 		// ----------
 		assert!(tx7.commit().is_ok());
@@ -1156,8 +1156,8 @@ mod tests {
 
 		// no conflict
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			txn1.set(key1, value1).unwrap();
 			txn1.commit().unwrap();
@@ -1169,8 +1169,8 @@ mod tests {
 
 		// conflict when the read key was updated by another transaction
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			txn1.set(key1, value1).unwrap();
 			txn1.commit().unwrap();
@@ -1182,8 +1182,8 @@ mod tests {
 
 		// blind writes should not succeed
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			txn1.set(key1, value1).unwrap();
 			txn2.set(key1, value2).unwrap();
@@ -1196,8 +1196,8 @@ mod tests {
 		{
 			let key = "key3";
 
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			txn1.set(key, value1).unwrap();
 			txn1.commit().unwrap();
@@ -1211,12 +1211,12 @@ mod tests {
 		{
 			let key = "key4";
 
-			let mut txn1 = db.begin();
+			let mut txn1 = db.transaction();
 			txn1.set(key, value1).unwrap();
 			txn1.commit().unwrap();
 
-			let mut txn2 = db.begin();
-			let mut txn3 = db.begin();
+			let mut txn2 = db.transaction();
+			let mut txn3 = db.transaction();
 
 			txn2.del(key).unwrap();
 			assert!(txn2.commit().is_ok());
@@ -1244,13 +1244,13 @@ mod tests {
 
 		// conflict when scan keys have been updated in another transaction
 		{
-			let mut txn1 = db.begin();
+			let mut txn1 = db.transaction();
 
 			txn1.set(key1, value1).unwrap();
 			txn1.commit().unwrap();
 
-			let mut txn2 = db.begin();
-			let mut txn3 = db.begin();
+			let mut txn2 = db.transaction();
+			let mut txn3 = db.transaction();
 
 			txn2.set(key1, value4).unwrap();
 			txn2.set(key2, value2).unwrap();
@@ -1268,13 +1268,13 @@ mod tests {
 
 		// write-skew: read conflict when read keys are deleted by other transaction
 		{
-			let mut txn1 = db.begin();
+			let mut txn1 = db.transaction();
 
 			txn1.set(key4, value1).unwrap();
 			txn1.commit().unwrap();
 
-			let mut txn2 = db.begin();
-			let mut txn3 = db.begin();
+			let mut txn2 = db.transaction();
+			let mut txn3 = db.transaction();
 
 			txn2.del(key4).unwrap();
 			txn2.commit().unwrap();
@@ -1295,7 +1295,7 @@ mod tests {
 		let value1 = "v1";
 		let value2 = "v2";
 		// Start a new read-write transaction (txn)
-		let mut txn = db.begin();
+		let mut txn = db.transaction();
 		txn.set(key1, value1).unwrap();
 		txn.set(key2, value2).unwrap();
 		txn.commit().unwrap();
@@ -1315,8 +1315,8 @@ mod tests {
 		let value6 = "v6";
 
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			assert!(txn1.get(key1).is_ok());
 			assert!(txn1.get(key2).is_ok());
@@ -1335,7 +1335,7 @@ mod tests {
 		}
 
 		{
-			let mut txn3 = db.begin();
+			let mut txn3 = db.transaction();
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value3);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1354,8 +1354,8 @@ mod tests {
 		let value3 = "v3";
 
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			assert!(txn1.get(key1).is_ok());
 
@@ -1376,7 +1376,7 @@ mod tests {
 		}
 
 		{
-			let mut txn3 = db.begin();
+			let mut txn3 = db.transaction();
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value1);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1395,8 +1395,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn1.get(key2).is_ok());
@@ -1428,8 +1428,8 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		// k3 should not be visible to txn1
 		let range = "k1".."k3";
@@ -1458,8 +1458,8 @@ mod tests {
 		let key1 = "k1";
 		let value3 = "v3";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn2.get(key1).is_ok());
@@ -1483,8 +1483,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 		assert_eq!(txn2.get(key1).unwrap().unwrap(), value1);
@@ -1510,8 +1510,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 
@@ -1543,8 +1543,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 		let range = "k1".."k2";
@@ -1575,8 +1575,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn2.get(key2).is_ok());
@@ -1601,8 +1601,8 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		assert!(txn1.get(key1).is_ok());
 		txn1.set(key1, &value3).unwrap();
@@ -1634,8 +1634,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.begin();
-		let mut txn2 = db.begin();
+		let mut txn1 = db.transaction();
+		let mut txn2 = db.transaction();
 
 		let range = "k1".."k2";
 		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
@@ -1670,8 +1670,8 @@ mod tests {
 
 		// inserts into read ranges of already-committed transaction(s) should fail
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			let range = "k1".."k4";
 			txn1.scan(range.clone(), None).expect("Scan should succeed");
@@ -1688,8 +1688,8 @@ mod tests {
 		// k1, k2, k3 already committed
 		// inserts beyond scan range should pass
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			let range = "k1".."k3";
 			txn1.scan(range.clone(), None).expect("Scan should succeed");
@@ -1705,8 +1705,8 @@ mod tests {
 		// k1, k2, k3, k4, k5 already committed
 		// inserts in subset scan ranges should fail
 		{
-			let mut txn1 = db.begin();
-			let mut txn2 = db.begin();
+			let mut txn1 = db.transaction();
+			let mut txn2 = db.transaction();
 
 			let range = "k1".."k7";
 			txn1.scan(range.clone(), None).expect("Scan should succeed");
