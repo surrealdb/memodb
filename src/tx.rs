@@ -1223,7 +1223,7 @@ mod tests {
 
 			assert!(txn3.get(key).is_ok());
 			txn3.set(key, value2).unwrap();
-			assert!(txn3.commit().is_ok());
+			assert!(txn3.commit().is_err());
 		}
 	}
 
@@ -1282,7 +1282,7 @@ mod tests {
 			let range = "key1".."key5";
 			let _ = txn3.scan(range, Some(10)).unwrap();
 			txn3.set(key4, value2).unwrap();
-			assert!(txn3.commit().is_ok());
+			assert!(txn3.commit().is_err());
 		}
 	}
 
