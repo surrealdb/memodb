@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-const GC_INTERVAL: Duration = Duration::from_secs(5);
+const GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A transactional in-memory database
 #[derive(Clone)]
@@ -87,7 +87,7 @@ where
 		Database::default()
 	}
 
-	/// Create a new database with inactive garbage collection.
+	/// Configure the database with inactive garbage collection.
 	///
 	/// This function will create a background thread which
 	/// will periodically remove any MVCC transaction entries
@@ -105,7 +105,7 @@ where
 		self
 	}
 
-	/// Create a new database with historic garbage collection.
+	/// Configure the database with historic garbage collection.
 	///
 	/// This function will create a background thread which
 	/// will periodically remove any MVCC transaction entries
