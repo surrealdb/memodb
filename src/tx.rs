@@ -446,95 +446,119 @@ where
 	}
 
 	/// Retrieve a range of keys from the database
-	pub fn keys<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
+	pub fn keys<Q>(
+		&self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.keys_any(rng, limit, None, Direction::Forward, self.version)
+		self.keys_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
 	/// Retrieve a range of keys from the database, in reverse order
-	pub fn keys_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<K>, Error>
+	pub fn keys_reverse<Q>(
+		&self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.keys_any(rng, limit, None, Direction::Reverse, self.version)
+		self.keys_any(rng, skip, limit, Direction::Reverse, self.version)
 	}
 
 	/// Retrieve a range of keys from the database at a specific version
 	pub fn keys_at_version<Q>(
 		&self,
 		rng: Range<Q>,
+		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
 	) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.keys_any(rng, limit, None, Direction::Forward, version)
+		self.keys_any(rng, skip, limit, Direction::Forward, version)
 	}
 
 	/// Retrieve a range of keys from the database at a specific version, in reverse order
 	pub fn keys_at_version_reverse<Q>(
 		&self,
 		rng: Range<Q>,
+		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
 	) -> Result<Vec<K>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.keys_any(rng, limit, None, Direction::Reverse, version)
+		self.keys_any(rng, skip, limit, Direction::Reverse, version)
 	}
 
 	/// Retrieve a range of keys and values from the database
-	pub fn scan<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	pub fn scan<Q>(
+		&self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.scan_any(rng, limit, None, Direction::Forward, self.version)
+		self.scan_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
 	/// Retrieve a range of keys and values from the database in reverse order
-	pub fn scan_reverse<Q>(&self, rng: Range<Q>, limit: Option<usize>) -> Result<Vec<(K, V)>, Error>
+	pub fn scan_reverse<Q>(
+		&self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.scan_any(rng, limit, None, Direction::Reverse, self.version)
+		self.scan_any(rng, skip, limit, Direction::Reverse, self.version)
 	}
 
 	/// Retrieve a range of keys and values from the database at a specific version
 	pub fn scan_at_version<Q>(
 		&self,
 		rng: Range<Q>,
+		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
 	) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.scan_any(rng, limit, None, Direction::Forward, version)
+		self.scan_any(rng, skip, limit, Direction::Forward, version)
 	}
 
 	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
 	pub fn scan_at_version_reverse<Q>(
 		&self,
 		rng: Range<Q>,
+		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
 	) -> Result<Vec<(K, V)>, Error>
 	where
 		Q: Borrow<K>,
 	{
-		self.scan_any(rng, limit, None, Direction::Reverse, version)
+		self.scan_any(rng, skip, limit, Direction::Reverse, version)
 	}
 
 	/// Retrieve a range of keys and values from the databases
 	fn keys_any<Q>(
 		&self,
 		rng: Range<Q>,
-		limit: Option<usize>,
 		skip: Option<usize>,
+		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
 	) -> Result<Vec<K>, Error>
@@ -681,8 +705,8 @@ where
 	fn scan_any<Q>(
 		&self,
 		rng: Range<Q>,
-		limit: Option<usize>,
 		skip: Option<usize>,
+		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
 	) -> Result<Vec<(K, V)>, Error>
@@ -1064,11 +1088,11 @@ mod tests {
 		tx2.set("key3", "value3").unwrap();
 		assert!(tx2.commit().is_ok());
 		// ----------
-		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		let res = tx3.scan("key1".."key9", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 1);
 		tx3.set("key2", "value5").unwrap();
 		tx3.set("key3", "value6").unwrap();
-		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		let res = tx3.scan("key1".."key9", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 3);
 		assert!(tx3.commit().is_err());
 	}
@@ -1087,12 +1111,12 @@ mod tests {
 		tx2.del("key1").unwrap();
 		assert!(tx2.commit().is_ok());
 		// ----------
-		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		let res = tx3.scan("key1".."key9", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 1);
 		tx3.set("key1", "other").unwrap();
 		tx3.set("key2", "value2").unwrap();
 		tx3.set("key3", "value3").unwrap();
-		let res = tx3.scan("key1".."key9", Some(10)).unwrap();
+		let res = tx3.scan("key1".."key9", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 3);
 		assert!(tx3.commit().is_err());
 	}
@@ -1258,7 +1282,7 @@ mod tests {
 			txn2.commit().unwrap();
 
 			let range = "key1".."key4";
-			let results = txn3.scan(range, Some(10)).unwrap();
+			let results = txn3.scan(range, None, Some(10)).unwrap();
 			assert_eq!(results.len(), 1);
 			txn3.set(key2, value5).unwrap();
 			txn3.set(key3, value6).unwrap();
@@ -1280,7 +1304,7 @@ mod tests {
 			txn2.commit().unwrap();
 
 			let range = "key1".."key5";
-			let _ = txn3.scan(range, Some(10)).unwrap();
+			let _ = txn3.scan(range, None, Some(10)).unwrap();
 			txn3.set(key4, value2).unwrap();
 			assert!(txn3.commit().is_err());
 		}
@@ -1362,13 +1386,13 @@ mod tests {
 			txn1.set(key1, value3).unwrap();
 
 			let range = "k1".."k3";
-			let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+			let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 			assert_eq!(res.len(), 2);
 			assert_eq!(res[0].1, value1);
 
 			drop(txn1);
 
-			let res = txn2.scan(range, None).expect("Scan should succeed");
+			let res = txn2.scan(range, None, None).expect("Scan should succeed");
 			assert_eq!(res.len(), 2);
 			assert_eq!(res[0].1, value1);
 
@@ -1404,14 +1428,14 @@ mod tests {
 		txn1.set(key1, value3).unwrap();
 
 		let range = "k1".."k3";
-		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 
 		txn1.set(key1, value4).unwrap();
 		txn1.commit().unwrap();
 
-		let res = txn2.scan(range, None).expect("Scan should succeed");
+		let res = txn2.scan(range, None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 
@@ -1433,7 +1457,7 @@ mod tests {
 
 		// k3 should not be visible to txn1
 		let range = "k1".."k3";
-		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
@@ -1444,7 +1468,7 @@ mod tests {
 
 		// k3 should still not be visible to txn1
 		let range = "k1".."k3";
-		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
@@ -1516,7 +1540,7 @@ mod tests {
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 
 		let range = "k1".."k2";
-		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
@@ -1548,7 +1572,7 @@ mod tests {
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 		let range = "k1".."k2";
-		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
@@ -1608,7 +1632,7 @@ mod tests {
 		txn1.set(key1, &value3).unwrap();
 
 		let range = "k1".."k2";
-		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
@@ -1617,7 +1641,7 @@ mod tests {
 		txn1.commit().unwrap();
 
 		let range = "k1".."k3";
-		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 1);
 		assert_eq!(res[0].1, value1);
 
@@ -1638,12 +1662,12 @@ mod tests {
 		let mut txn2 = db.transaction();
 
 		let range = "k1".."k2";
-		let res = txn1.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
 
-		let res = txn2.scan(range.clone(), None).expect("Scan should succeed");
+		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
@@ -1674,8 +1698,8 @@ mod tests {
 			let mut txn2 = db.transaction();
 
 			let range = "k1".."k4";
-			txn1.scan(range.clone(), None).expect("Scan should succeed");
-			txn2.scan(range.clone(), None).expect("Scan should succeed");
+			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
+			txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 
 			txn1.set(key3, &value3).unwrap();
 			txn2.set(key4, &value4).unwrap();
@@ -1692,8 +1716,8 @@ mod tests {
 			let mut txn2 = db.transaction();
 
 			let range = "k1".."k3";
-			txn1.scan(range.clone(), None).expect("Scan should succeed");
-			txn2.scan(range.clone(), None).expect("Scan should succeed");
+			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
+			txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 
 			txn1.set(key4, &value3).unwrap();
 			txn2.set(key5, &value4).unwrap();
@@ -1709,9 +1733,9 @@ mod tests {
 			let mut txn2 = db.transaction();
 
 			let range = "k1".."k7";
-			txn1.scan(range.clone(), None).expect("Scan should succeed");
+			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 			let range = "k3".."k7";
-			txn2.scan(range.clone(), None).expect("Scan should succeed");
+			txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 
 			txn1.set(key6, &value3).unwrap();
 			txn2.set(key7, &value4).unwrap();
