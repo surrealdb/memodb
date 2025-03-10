@@ -358,7 +358,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.keys("c".."z", Some(10)).unwrap();
+		let res = tx.keys("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
 		assert_eq!(res[1], "d");
@@ -374,7 +374,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction();
-		let res = tx.keys("c".."z", Some(10)).unwrap();
+		let res = tx.keys("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
 		assert_eq!(res[1], "d");
@@ -386,6 +386,22 @@ mod tests {
 		assert_eq!(res[7], "j");
 		assert_eq!(res[8], "k");
 		assert_eq!(res[9], "l");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction();
+		let res = tx.keys("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "f");
+		assert_eq!(res[1], "g");
+		assert_eq!(res[2], "h");
+		assert_eq!(res[3], "i");
+		assert_eq!(res[4], "j");
+		assert_eq!(res[5], "k");
+		assert_eq!(res[6], "l");
+		assert_eq!(res[7], "m");
+		assert_eq!(res[8], "n");
+		assert_eq!(res[9], "o");
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
@@ -410,7 +426,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
+		let res = tx.keys_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
 		assert_eq!(res[1], "n");
@@ -426,7 +442,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction();
-		let res = tx.keys_reverse("c".."z", Some(10)).unwrap();
+		let res = tx.keys_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
 		assert_eq!(res[1], "n");
@@ -438,6 +454,22 @@ mod tests {
 		assert_eq!(res[7], "h");
 		assert_eq!(res[8], "g");
 		assert_eq!(res[9], "f");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction();
+		let res = tx.keys_reverse("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "l");
+		assert_eq!(res[1], "k");
+		assert_eq!(res[2], "j");
+		assert_eq!(res[3], "i");
+		assert_eq!(res[4], "h");
+		assert_eq!(res[5], "g");
+		assert_eq!(res[6], "f");
+		assert_eq!(res[7], "e");
+		assert_eq!(res[8], "d");
+		assert_eq!(res[9], "c");
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
@@ -462,7 +494,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.scan("c".."z", Some(10)).unwrap();
+		let res = tx.scan("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
 		assert_eq!(res[1], ("d", "d"));
@@ -478,7 +510,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction();
-		let res = tx.scan("c".."z", Some(10)).unwrap();
+		let res = tx.scan("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
 		assert_eq!(res[1], ("d", "d"));
@@ -490,6 +522,22 @@ mod tests {
 		assert_eq!(res[7], ("j", "j"));
 		assert_eq!(res[8], ("k", "k"));
 		assert_eq!(res[9], ("l", "l"));
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction();
+		let res = tx.scan("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], ("f", "f"));
+		assert_eq!(res[1], ("g", "g"));
+		assert_eq!(res[2], ("h", "h"));
+		assert_eq!(res[3], ("i", "i"));
+		assert_eq!(res[4], ("j", "j"));
+		assert_eq!(res[5], ("k", "k"));
+		assert_eq!(res[6], ("l", "l"));
+		assert_eq!(res[7], ("m", "m"));
+		assert_eq!(res[8], ("n", "n"));
+		assert_eq!(res[9], ("o", "o"));
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
@@ -514,7 +562,7 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
+		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
 		assert_eq!(res[1], ("n", "n"));
@@ -530,7 +578,7 @@ mod tests {
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction();
-		let res = tx.scan_reverse("c".."z", Some(10)).unwrap();
+		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
 		assert_eq!(res[1], ("n", "n"));
@@ -542,6 +590,22 @@ mod tests {
 		assert_eq!(res[7], ("h", "h"));
 		assert_eq!(res[8], ("g", "g"));
 		assert_eq!(res[9], ("f", "f"));
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction();
+		let res = tx.scan_reverse("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], ("l", "l"));
+		assert_eq!(res[1], ("k", "k"));
+		assert_eq!(res[2], ("j", "j"));
+		assert_eq!(res[3], ("i", "i"));
+		assert_eq!(res[4], ("h", "h"));
+		assert_eq!(res[5], ("g", "g"));
+		assert_eq!(res[6], ("f", "f"));
+		assert_eq!(res[7], ("e", "e"));
+		assert_eq!(res[8], ("d", "d"));
+		assert_eq!(res[9], ("c", "c"));
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
