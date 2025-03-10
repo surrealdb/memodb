@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-const GC_INTERVAL: Duration = Duration::from_secs(5);
+const GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A transactional in-memory database
 #[derive(Clone)]
