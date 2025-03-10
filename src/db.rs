@@ -87,7 +87,7 @@ where
 		Database::default()
 	}
 
-	/// Create a new database with inactive garbage collection.
+	/// Configure the database with inactive garbage collection.
 	///
 	/// This function will create a background thread which
 	/// will periodically remove any MVCC transaction entries
@@ -105,7 +105,7 @@ where
 		self
 	}
 
-	/// Create a new database with historic garbage collection.
+	/// Configure the database with historic garbage collection.
 	///
 	/// This function will create a background thread which
 	/// will periodically remove any MVCC transaction entries
