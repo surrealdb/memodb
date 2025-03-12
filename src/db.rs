@@ -31,7 +31,7 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	// The inner strcuture of an Oracle
+	// The inner strcuture of the Oracle
 	inner: Arc<Inner<K, V>>,
 }
 
