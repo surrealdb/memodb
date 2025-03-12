@@ -7,6 +7,8 @@ pub struct Commit<K>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 {
+	/// The unique id of this commit attempt
+	pub(crate) id: u64,
 	/// The current state of this transaction
 	pub(crate) done: AtomicBool,
 	/// The local set of updates and deletes

@@ -24,6 +24,7 @@ use sorted_vec::SortedVec;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -41,12 +42,12 @@ where
 	pub(crate) counter_by_oracle: SkipMap<u64, AtomicU64>,
 	/// A count of total transactions grouped by commit id
 	pub(crate) counter_by_commit: SkipMap<u64, AtomicU64>,
-	/// The transaction commit queue sequence number
-	pub(crate) transaction_commit: AtomicU64,
+	/// The transaction commit queue attempt sequence number
+	pub(crate) transaction_queue_id: AtomicU64,
+	/// The transaction commit queue success sequence number
+	pub(crate) transaction_commit_id: AtomicU64,
 	/// The transaction commit queue list of modifications
-	pub(crate) transaction_commit_queue: SkipMap<u64, Commit<K>>,
-	/// A read-write lock for use when serializing transaction commits
-	pub(crate) transaction_commit_queue_lock: RwLock<()>,
+	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit<K>>>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, BTreeMap<K, Option<V>>>,
 	/// A read-write lock for use when serializing transaction commits
@@ -70,9 +71,9 @@ where
 			datastore: BPlusTree::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
-			transaction_commit: AtomicU64::new(0),
+			transaction_queue_id: AtomicU64::new(0),
+			transaction_commit_id: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
-			transaction_commit_queue_lock: RwLock::new(()),
 			transaction_merge_queue: SkipMap::new(),
 			transaction_merge_queue_lock: RwLock::new(()),
 			garbage_collection_epoch: RwLock::new(None),

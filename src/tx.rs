@@ -27,6 +27,7 @@ use std::fmt::Debug;
 use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// The commit behaviour of a database transaction
 pub enum Mode {
@@ -86,7 +87,9 @@ where
 			// Decrement the transaction counter for this commit queue id
 			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
 			// Check if we can clear up the transaction counter for this commit queue id
-			if total == 1 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
+			if total == 1
+				&& self.database.transaction_commit_id.load(Ordering::SeqCst) > self.commit
+			{
 				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the counter entries up to this commit queue id
@@ -126,7 +129,7 @@ where
 		// Prepare and increment the commit counter
 		let commit = {
 			// Get the current commit sequence number
-			let value = db.transaction_commit.load(Ordering::SeqCst);
+			let value = db.transaction_commit_id.load(Ordering::SeqCst);
 			// Initialise the transaction commit counter
 			let count = db.counter_by_commit.get_or_insert_with(value, || AtomicU64::new(1));
 			// Increment the transaction commit counter
@@ -195,19 +198,12 @@ where
 		if self.writeset.is_empty() {
 			return Ok(());
 		}
-		// Clone the transaction modification keyset
-		let updates = Commit {
+		// Insert this transaction into the commit queue
+		let commit = self.atomic_commit(Commit {
 			done: AtomicBool::new(false),
 			keyset: self.writeset.keys().cloned().collect(),
-		};
-		// Acquire the lock, ensuring serialized transactions
-		let lock = self.database.transaction_commit_queue_lock.write();
-		// Increase the transaction commit queue number
-		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
-		// Insert this transaction into the commit queue
-		self.database.transaction_commit_queue.insert(commit, updates);
-		// Drop the transaction serialization lock
-		std::mem::drop(lock);
+			id: self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1,
+		});
 		// Fetch the entry for the current transaction
 		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
@@ -962,6 +958,29 @@ where
 			// if the key is not present in
 			// the tree at all.
 			.flatten()
+	}
+
+	fn atomic_commit(&self, updates: Commit<K>) -> u64 {
+		// Get the commit attempt id
+		let id = updates.id;
+		// Store the commit in an Arc
+		let updates = Arc::new(updates);
+		// Loop until the atomic operation is successful
+		loop {
+			// Clone the commit arc reference
+			let updates = Arc::clone(&updates);
+			// Get the database transaction merge queue
+			let queue = &self.database.transaction_commit_queue;
+			// Get the current commit queue number
+			let commit = self.database.transaction_commit_id.load(Ordering::SeqCst) + 1;
+			// Insert into the queue if the number is the same
+			let entry = queue.compare_insert(commit, updates, |v| id == v.id);
+			// Check if the entry was inserted correctly
+			if id == entry.value().id {
+				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
+				return commit;
+			}
+		}
 	}
 }
 
