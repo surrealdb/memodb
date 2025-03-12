@@ -14,12 +14,12 @@
 
 #![allow(clippy::bool_comparison)]
 
-mod commit;
 mod db;
 mod direction;
 mod err;
 mod inner;
 mod oracle;
+mod queue;
 mod tx;
 mod version;
 

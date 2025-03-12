@@ -14,9 +14,9 @@
 
 //! This module stores the database transaction logic.
 
-use crate::commit::Commit;
 use crate::direction::Direction;
 use crate::err::Error;
+use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::Database;
 use crossbeam_skiplist::SkipMap;
@@ -24,7 +24,6 @@ use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::mem::take;
 use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -200,18 +199,16 @@ where
 			return Ok(());
 		}
 		// Insert this transaction into the commit queue
-		let commit = self.atomic_commit(Commit {
+		let (version, entry) = self.atomic_commit(Commit {
 			keyset: self.writeset.keys().cloned().collect(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1,
 		});
-		// Fetch the entry for the current transaction
-		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
 		// Retrieve all transactions committed since we began
-		for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit) {
+		for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
 			// A previous transaction has conflicts against writes
-			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
+			if !tx.value().keyset.is_disjoint(&entry.keyset) {
 				// Remove the transaction from the commit queue
-				self.database.transaction_commit_queue.remove(&commit);
+				self.database.transaction_commit_queue.remove(&version);
 				// Return the error for this transaction
 				return Err(Error::KeyWriteConflict);
 			}
@@ -220,7 +217,7 @@ where
 				// A previous transaction has conflicts against reads
 				if !tx.value().keyset.is_disjoint(&self.readset) {
 					// Remove the transaction from the commit queue
-					self.database.transaction_commit_queue.remove(&commit);
+					self.database.transaction_commit_queue.remove(&version);
 					// Return the error for this transaction
 					return Err(Error::KeyReadConflict);
 				}
@@ -231,7 +228,7 @@ where
 						// Check if the range includes this key
 						if entry.value() > k {
 							// Remove the transaction from the commit queue
-							self.database.transaction_commit_queue.remove(&commit);
+							self.database.transaction_commit_queue.remove(&version);
 							// Return the error for this transaction
 							return Err(Error::KeyReadConflict);
 						}
@@ -239,20 +236,17 @@ where
 				}
 			}
 		}
-		// Clone the transaction modifications
-		let updates = take(&mut self.writeset);
-		// Acquire the lock, ensuring serialized transactions
-		let lock = self.database.transaction_merge_queue_lock.write();
-		// Increase the datastore sequence number
-		let version = self.database.oracle.next_timestamp();
-		// Add this transaction to the merge queue
-		let entry = self.database.transaction_merge_queue.insert(version, updates);
-		// Drop the transaction serialization lock
-		std::mem::drop(lock);
+		// Take ownership over the local modifications
+		let writeset = std::mem::take(&mut self.writeset);
+		// Insert this transaction into the merge queue
+		let (version, entry) = self.atomic_merge(Merge {
+			writeset,
+			id: self.database.transaction_merge_id.fetch_add(1, Ordering::SeqCst) + 1,
+		});
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
-		for (key, value) in entry.value().iter() {
+		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Check if this key already exists
@@ -846,18 +840,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Ensure we see committing transactions
-		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Drop the merge queue read lock quickly
-		std::mem::drop(lock);
 		// Check the current entry iteration
 		for entry in iter.rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				if let Some(v) = entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return the entry value
 					return v.clone();
 				}
@@ -885,18 +875,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Ensure we see committing transactions
-		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Drop the merge queue read lock quickly
-		std::mem::drop(lock);
 		// Check the current entry iteration
 		for entry in iter.rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				if let Some(v) = entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return whether the entry exists
 					return v.is_some();
 				}
@@ -925,17 +911,13 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Ensure we see committing transactions
-		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Drop the merge queue read lock quickly
-		std::mem::drop(lock);
 		// Check the current entry iteration
 		for entry in iter.rev() {
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				if let Some(v) = entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return whether the entry matches
 					return v == &chk;
 				}
@@ -960,7 +942,8 @@ where
 			.flatten()
 	}
 
-	fn atomic_commit(&self, updates: Commit<K>) -> u64 {
+	/// Atomimcally inserts the transaction into the commit queue
+	fn atomic_commit(&self, updates: Commit<K>) -> (u64, Arc<Commit<K>>) {
 		// Get the commit attempt id
 		let id = updates.id;
 		// Store the commit in an Arc
@@ -972,13 +955,45 @@ where
 			// Get the database transaction merge queue
 			let queue = &self.database.transaction_commit_queue;
 			// Get the current commit queue number
-			let commit = self.database.transaction_commit_id.load(Ordering::SeqCst) + 1;
+			let version = self.database.transaction_commit_id.load(Ordering::SeqCst) + 1;
 			// Insert into the queue if the number is the same
-			let entry = queue.compare_insert(commit, updates, |v| id == v.id);
+			let entry = queue.compare_insert(version, updates, |v| id == v.id);
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
 				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
-				return commit;
+				return (version, entry.value().clone());
+			}
+		}
+	}
+
+	/// Atomimcally inserts the transaction into the merge queue
+	fn atomic_merge(&self, updates: Merge<K, V>) -> (u64, Arc<Merge<K, V>>) {
+		// Get the commit attempt id
+		let id = updates.id;
+		// Store the commit in an Arc
+		let updates = Arc::new(updates);
+		// Get the database timestamp oracle
+		let oracle = self.database.oracle.clone();
+		// Get the current nanoseconds since the Unix epoch
+		let mut version = oracle.current_time_ns();
+		// Loop until we reach the next incremental timestamp
+		loop {
+			// Clone the commit arc reference
+			let updates = Arc::clone(&updates);
+			// Get the database transaction merge queue
+			let queue = &self.database.transaction_merge_queue;
+			// Get the last timestamp for this oracle
+			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
+			// Increase the timestamp to ensure monotonicity
+			if version <= last_ts {
+				version = last_ts + 1;
+			}
+			// Insert into the queue if the number is the same
+			let entry = queue.compare_insert(version, updates, |v| id == v.id);
+			// Check if the entry was inserted correctly
+			if id == entry.value().id {
+				oracle.inner.timestamp.store(version, Ordering::SeqCst);
+				return (version, entry.value().clone());
 			}
 		}
 	}
