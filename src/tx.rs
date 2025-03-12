@@ -30,8 +30,8 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// The commit behaviour of a database transaction
-pub enum Mode {
+/// The isolation level of a database transaction
+pub enum IsolationLevel {
 	SnapshotIsolation,
 	SerializableSnapshotIsolation,
 }
@@ -42,14 +42,16 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// The commit mode of this transaction
-	mode: Mode,
+	/// The isolation level of this transaction
+	mode: IsolationLevel,
 	/// Is the transaction complete?
 	done: bool,
 	/// The version at which this transaction started
 	commit: u64,
 	/// The version at which this transaction started
 	version: u64,
+	/// The version at which this transaction committed
+	success: u64,
 	/// The local set of key scans
 	scanset: SkipMap<K, K>,
 	/// The local set of key reads
@@ -140,10 +142,11 @@ where
 		};
 		// Create the read only transaction
 		Transaction {
-			mode: Mode::SerializableSnapshotIsolation,
+			mode: IsolationLevel::SerializableSnapshotIsolation,
 			done: false,
 			commit,
 			version,
+			success: 0,
 			scanset: SkipMap::new(),
 			readset: BTreeSet::new(),
 			writeset: BTreeMap::new(),
@@ -153,13 +156,13 @@ where
 
 	/// Ensure this transaction is committed with snapshot isolation guarantees
 	pub fn with_snapshot_isolation(mut self) -> Self {
-		self.mode = Mode::SnapshotIsolation;
+		self.mode = IsolationLevel::SnapshotIsolation;
 		self
 	}
 
 	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
 	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
-		self.mode = Mode::SerializableSnapshotIsolation;
+		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
 
@@ -216,7 +219,7 @@ where
 				return Err(Error::KeyWriteConflict);
 			}
 			// Check if we should check for conflicting read keys
-			if let Mode::SerializableSnapshotIsolation = self.mode {
+			if let IsolationLevel::SerializableSnapshotIsolation = self.mode {
 				// A previous transaction has conflicts against reads
 				if !tx.value().keyset.is_disjoint(&self.readset) {
 					// Remove the transaction from the commit queue
@@ -249,6 +252,8 @@ where
 		let entry = self.database.transaction_merge_queue.insert(version, updates);
 		// Drop the transaction serialization lock
 		std::mem::drop(lock);
+		// Store the final commit version number
+		self.success = version;
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
