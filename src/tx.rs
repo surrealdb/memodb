@@ -24,9 +24,10 @@ use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::mem::take;
 use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// The commit behaviour of a database transaction
@@ -200,7 +201,6 @@ where
 		}
 		// Insert this transaction into the commit queue
 		let commit = self.atomic_commit(Commit {
-			done: AtomicBool::new(false),
 			keyset: self.writeset.keys().cloned().collect(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1,
 		});
@@ -240,21 +240,23 @@ where
 			}
 		}
 		// Clone the transaction modifications
-		let updates = self.writeset.clone();
+		let updates = take(&mut self.writeset);
 		// Acquire the lock, ensuring serialized transactions
 		let lock = self.database.transaction_merge_queue_lock.write();
 		// Increase the datastore sequence number
 		let version = self.database.oracle.next_timestamp();
 		// Add this transaction to the merge queue
-		self.database.transaction_merge_queue.insert(version, updates);
+		let entry = self.database.transaction_merge_queue.insert(version, updates);
 		// Drop the transaction serialization lock
 		std::mem::drop(lock);
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
-		for (key, value) in std::mem::take(&mut self.writeset) {
+		for (key, value) in entry.value().iter() {
+			// Clone the value for insertion
+			let value = value.clone();
 			// Check if this key already exists
-			if iter.seek_exact(&key) {
+			if iter.seek_exact(key) {
 				// We know it exists, so we can unwrap
 				iter.next().unwrap().1.push(Version {
 					version,
@@ -263,7 +265,7 @@ where
 			} else {
 				// Otherwise insert a new entry into the tree
 				iter.insert(
-					key,
+					key.clone(),
 					SortedVec::from(vec![Version {
 						version,
 						value,
@@ -273,8 +275,6 @@ where
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
-		// Mark the transaction as done
-		entry.value().done.store(true, Ordering::SeqCst);
 		// Continue
 		Ok(())
 	}
