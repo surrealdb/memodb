@@ -50,8 +50,6 @@ where
 	commit: u64,
 	/// The version at which this transaction started
 	version: u64,
-	/// The version at which this transaction committed
-	success: u64,
 	/// The local set of key scans
 	scanset: SkipMap<K, K>,
 	/// The local set of key reads
@@ -146,7 +144,6 @@ where
 			done: false,
 			commit,
 			version,
-			success: 0,
 			scanset: SkipMap::new(),
 			readset: BTreeSet::new(),
 			writeset: BTreeMap::new(),
@@ -252,8 +249,6 @@ where
 		let entry = self.database.transaction_merge_queue.insert(version, updates);
 		// Drop the transaction serialization lock
 		std::mem::drop(lock);
-		// Store the final commit version number
-		self.success = version;
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
