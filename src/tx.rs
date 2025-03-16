@@ -19,18 +19,18 @@ use crate::err::Error;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::Database;
-use crossbeam_skiplist::SkipMap;
 use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// The isolation level of a database transaction
+#[derive(PartialEq, PartialOrd)]
 pub enum IsolationLevel {
+	WriteCommitted,
 	SnapshotIsolation,
 	SerializableSnapshotIsolation,
 }
@@ -49,10 +49,10 @@ where
 	commit: u64,
 	/// The version at which this transaction started
 	version: u64,
-	/// The local set of key scans
-	scanset: SkipMap<K, K>,
 	/// The local set of key reads
 	readset: BTreeSet<K>,
+	/// The local set of key scans
+	scanset: BTreeMap<K, K>,
 	/// The local set of updates and deletes
 	writeset: BTreeMap<K, Option<V>>,
 	/// The parent database for this transaction
@@ -143,11 +143,17 @@ where
 			done: false,
 			commit,
 			version,
-			scanset: SkipMap::new(),
 			readset: BTreeSet::new(),
+			scanset: BTreeMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
 		}
+	}
+
+	/// Ensure this transaction is committed with write committed guarantees
+	pub fn with_write_committed(mut self) -> Self {
+		self.mode = IsolationLevel::WriteCommitted;
+		self
 	}
 
 	/// Ensure this transaction is committed with snapshot isolation guarantees
@@ -203,34 +209,37 @@ where
 			keyset: self.writeset.keys().cloned().collect(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1,
 		});
-		// Retrieve all transactions committed since we began
-		for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
-			// A previous transaction has conflicts against writes
-			if !tx.value().keyset.is_disjoint(&entry.keyset) {
-				// Remove the transaction from the commit queue
-				self.database.transaction_commit_queue.remove(&version);
-				// Return the error for this transaction
-				return Err(Error::KeyWriteConflict);
-			}
-			// Check if we should check for conflicting read keys
-			if let IsolationLevel::SerializableSnapshotIsolation = self.mode {
-				// A previous transaction has conflicts against reads
-				if !tx.value().keyset.is_disjoint(&self.readset) {
+		// Check wether we should check reads conflicts on commit
+		if self.mode >= IsolationLevel::SnapshotIsolation {
+			// Retrieve all transactions committed since we began
+			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
+				// A previous transaction has conflicts against writes
+				if !tx.value().keyset.is_disjoint(&entry.keyset) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
 					// Return the error for this transaction
-					return Err(Error::KeyReadConflict);
+					return Err(Error::KeyWriteConflict);
 				}
-				// A previous transaction has conflicts against scans
-				for k in tx.value().keyset.iter() {
-					// Check if this key may be within a scan range
-					if let Some(entry) = self.scanset.upper_bound(Bound::Included(k)) {
-						// Check if the range includes this key
-						if entry.value() > k {
-							// Remove the transaction from the commit queue
-							self.database.transaction_commit_queue.remove(&version);
-							// Return the error for this transaction
-							return Err(Error::KeyReadConflict);
+				// Check if we should check for conflicting read keys
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					// A previous transaction has conflicts against reads
+					if !tx.value().keyset.is_disjoint(&self.readset) {
+						// Remove the transaction from the commit queue
+						self.database.transaction_commit_queue.remove(&version);
+						// Return the error for this transaction
+						return Err(Error::KeyReadConflict);
+					}
+					// A previous transaction has conflicts against scans
+					for k in tx.value().keyset.iter() {
+						// Check if this key may be within a scan range
+						if let Some(range) = self.scanset.range(..=k).next_back() {
+							// Check if the range includes this key
+							if range.1 > k {
+								// Remove the transaction from the commit queue
+								self.database.transaction_commit_queue.remove(&version);
+								// Return the error for this transaction
+								return Err(Error::KeyReadConflict);
+							}
 						}
 					}
 				}
@@ -288,8 +297,13 @@ where
 			Some(_) => true,
 			// Check for the key in the tree
 			None => {
+				// Check for the key in the datastore
 				let res = self.exists_in_datastore(key.borrow(), self.version);
-				self.readset.insert(key.into());
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SnapshotIsolation {
+					self.readset.insert(key.into());
+				}
+				// Return the result
 				res
 			}
 		};
@@ -327,8 +341,13 @@ where
 			Some(v) => v.clone(),
 			// Check for the key in the tree
 			None => {
+				// Fetch for the key from the datastore
 				let res = self.fetch_in_datastore(key.borrow(), self.version);
-				self.readset.insert(key.into());
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SnapshotIsolation {
+					self.readset.insert(key.into());
+				}
+				// Return the result
 				res
 			}
 		};
@@ -437,7 +456,7 @@ where
 
 	/// Retrieve a range of keys from the database
 	pub fn keys<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -450,7 +469,7 @@ where
 
 	/// Retrieve a range of keys from the database, in reverse order
 	pub fn keys_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -463,7 +482,7 @@ where
 
 	/// Retrieve a range of keys from the database at a specific version
 	pub fn keys_at_version<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -477,7 +496,7 @@ where
 
 	/// Retrieve a range of keys from the database at a specific version, in reverse order
 	pub fn keys_at_version_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -491,7 +510,7 @@ where
 
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -504,7 +523,7 @@ where
 
 	/// Retrieve a range of keys and values from the database in reverse order
 	pub fn scan_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -517,7 +536,7 @@ where
 
 	/// Retrieve a range of keys and values from the database at a specific version
 	pub fn scan_at_version<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -531,7 +550,7 @@ where
 
 	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
 	pub fn scan_at_version_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -545,7 +564,7 @@ where
 
 	/// Retrieve a range of keys and values from the databases
 	fn keys_any<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -569,14 +588,28 @@ where
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
-		// Add the entry to the scan range set
-		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
-			// Check if the range includes this key
-			if entry.value() < beg || entry.value() < end {
-				self.scanset.insert(beg.clone(), end.clone());
+		// Check wether we should track range scan reads
+		if self.mode >= IsolationLevel::SnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				// Add this range scan entry to the saved scans
+				match self.scanset.range_mut(..=beg).next_back() {
+					// There is no entry for this range scan
+					None => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan stops before this range
+					Some(range) if &*range.1 < beg => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan does not extend far enough
+					Some(range) if &*range.1 < end => {
+						*range.1 = end.clone();
+					}
+					// This range scan is already covered
+					_ => (),
+				};
 			}
-		} else {
-			self.scanset.insert(beg.clone(), end.clone());
 		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
@@ -693,7 +726,7 @@ where
 
 	/// Retrieve a range of keys and values from the databases
 	fn scan_any<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -717,14 +750,28 @@ where
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
-		// Add the entry to the scan range set
-		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
-			// Check if the range includes this key
-			if entry.value() < beg || entry.value() < end {
-				self.scanset.insert(beg.clone(), end.clone());
+		// Check wether we should track range scan reads
+		if self.mode >= IsolationLevel::SnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				// Add this range scan entry to the saved scans
+				match self.scanset.range_mut(..=beg).next_back() {
+					// There is no entry for this range scan
+					None => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan stops before this range
+					Some(range) if &*range.1 < beg => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan does not extend far enough
+					Some(range) if &*range.1 < end => {
+						*range.1 = end.clone();
+					}
+					// This range scan is already covered
+					_ => (),
+				};
 			}
-		} else {
-			self.scanset.insert(beg.clone(), end.clone());
 		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
@@ -1486,7 +1533,7 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let txn1 = db.transaction();
+		let mut txn1 = db.transaction();
 		let mut txn2 = db.transaction();
 
 		// k3 should not be visible to txn1
