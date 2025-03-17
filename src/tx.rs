@@ -300,7 +300,7 @@ where
 				// Check for the key in the datastore
 				let res = self.exists_in_datastore(key.borrow(), self.version);
 				// Check whether we should track key reads
-				if self.mode >= IsolationLevel::SnapshotIsolation {
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					self.readset.insert(key.into());
 				}
 				// Return the result
@@ -344,7 +344,7 @@ where
 				// Fetch for the key from the datastore
 				let res = self.fetch_in_datastore(key.borrow(), self.version);
 				// Check whether we should track key reads
-				if self.mode >= IsolationLevel::SnapshotIsolation {
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					self.readset.insert(key.into());
 				}
 				// Return the result
@@ -589,7 +589,7 @@ where
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
-		if self.mode >= IsolationLevel::SnapshotIsolation {
+		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
 				// Add this range scan entry to the saved scans
@@ -751,7 +751,7 @@ where
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
-		if self.mode >= IsolationLevel::SnapshotIsolation {
+		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
 				// Add this range scan entry to the saved scans
