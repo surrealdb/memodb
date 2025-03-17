@@ -14,22 +14,23 @@
 
 //! This module stores the database transaction logic.
 
-use crate::commit::Commit;
 use crate::direction::Direction;
 use crate::err::Error;
+use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::Database;
-use crossbeam_skiplist::SkipMap;
 use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-/// The commit behaviour of a database transaction
-pub enum Mode {
+/// The isolation level of a database transaction
+#[derive(PartialEq, PartialOrd)]
+pub enum IsolationLevel {
+	WriteCommitted,
 	SnapshotIsolation,
 	SerializableSnapshotIsolation,
 }
@@ -40,18 +41,18 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// The commit mode of this transaction
-	mode: Mode,
+	/// The isolation level of this transaction
+	mode: IsolationLevel,
 	/// Is the transaction complete?
 	done: bool,
 	/// The version at which this transaction started
 	commit: u64,
 	/// The version at which this transaction started
 	version: u64,
-	/// The local set of key scans
-	scanset: SkipMap<K, K>,
 	/// The local set of key reads
 	readset: BTreeSet<K>,
+	/// The local set of key scans
+	scanset: BTreeMap<K, K>,
 	/// The local set of updates and deletes
 	writeset: BTreeMap<K, Option<V>>,
 	/// The parent database for this transaction
@@ -86,7 +87,9 @@ where
 			// Decrement the transaction counter for this commit queue id
 			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
 			// Check if we can clear up the transaction counter for this commit queue id
-			if total == 1 && self.database.transaction_commit.load(Ordering::SeqCst) > self.commit {
+			if total == 1
+				&& self.database.transaction_commit_id.load(Ordering::SeqCst) > self.commit
+			{
 				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the counter entries up to this commit queue id
@@ -126,7 +129,7 @@ where
 		// Prepare and increment the commit counter
 		let commit = {
 			// Get the current commit sequence number
-			let value = db.transaction_commit.load(Ordering::SeqCst);
+			let value = db.transaction_commit_id.load(Ordering::SeqCst);
 			// Initialise the transaction commit counter
 			let count = db.counter_by_commit.get_or_insert_with(value, || AtomicU64::new(1));
 			// Increment the transaction commit counter
@@ -136,26 +139,32 @@ where
 		};
 		// Create the read only transaction
 		Transaction {
-			mode: Mode::SerializableSnapshotIsolation,
+			mode: IsolationLevel::SerializableSnapshotIsolation,
 			done: false,
 			commit,
 			version,
-			scanset: SkipMap::new(),
 			readset: BTreeSet::new(),
+			scanset: BTreeMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
 		}
 	}
 
+	/// Ensure this transaction is committed with write committed guarantees
+	pub fn with_write_committed(mut self) -> Self {
+		self.mode = IsolationLevel::WriteCommitted;
+		self
+	}
+
 	/// Ensure this transaction is committed with snapshot isolation guarantees
 	pub fn with_snapshot_isolation(mut self) -> Self {
-		self.mode = Mode::SnapshotIsolation;
+		self.mode = IsolationLevel::SnapshotIsolation;
 		self
 	}
 
 	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
 	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
-		self.mode = Mode::SerializableSnapshotIsolation;
+		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
 
@@ -195,70 +204,62 @@ where
 		if self.writeset.is_empty() {
 			return Ok(());
 		}
-		// Clone the transaction modification keyset
-		let updates = Commit {
-			done: AtomicBool::new(false),
-			keyset: self.writeset.keys().cloned().collect(),
-		};
-		// Acquire the lock, ensuring serialized transactions
-		let lock = self.database.transaction_commit_queue_lock.write();
-		// Increase the transaction commit queue number
-		let commit = self.database.transaction_commit.fetch_add(1, Ordering::SeqCst) + 1;
 		// Insert this transaction into the commit queue
-		self.database.transaction_commit_queue.insert(commit, updates);
-		// Drop the transaction serialization lock
-		std::mem::drop(lock);
-		// Fetch the entry for the current transaction
-		let entry = self.database.transaction_commit_queue.get(&commit).unwrap();
-		// Retrieve all transactions committed since we began
-		for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit) {
-			// A previous transaction has conflicts against writes
-			if !tx.value().keyset.is_disjoint(&entry.value().keyset) {
-				// Remove the transaction from the commit queue
-				self.database.transaction_commit_queue.remove(&commit);
-				// Return the error for this transaction
-				return Err(Error::KeyWriteConflict);
-			}
-			// Check if we should check for conflicting read keys
-			if let Mode::SerializableSnapshotIsolation = self.mode {
-				// A previous transaction has conflicts against reads
-				if !tx.value().keyset.is_disjoint(&self.readset) {
+		let (version, entry) = self.atomic_commit(Commit {
+			keyset: self.writeset.keys().cloned().collect(),
+			id: self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1,
+		});
+		// Check wether we should check reads conflicts on commit
+		if self.mode >= IsolationLevel::SnapshotIsolation {
+			// Retrieve all transactions committed since we began
+			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
+				// A previous transaction has conflicts against writes
+				if !tx.value().keyset.is_disjoint(&entry.keyset) {
 					// Remove the transaction from the commit queue
-					self.database.transaction_commit_queue.remove(&commit);
+					self.database.transaction_commit_queue.remove(&version);
 					// Return the error for this transaction
-					return Err(Error::KeyReadConflict);
+					return Err(Error::KeyWriteConflict);
 				}
-				// A previous transaction has conflicts against scans
-				for k in tx.value().keyset.iter() {
-					// Check if this key may be within a scan range
-					if let Some(entry) = self.scanset.upper_bound(Bound::Included(k)) {
-						// Check if the range includes this key
-						if entry.value() > k {
-							// Remove the transaction from the commit queue
-							self.database.transaction_commit_queue.remove(&commit);
-							// Return the error for this transaction
-							return Err(Error::KeyReadConflict);
+				// Check if we should check for conflicting read keys
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					// A previous transaction has conflicts against reads
+					if !tx.value().keyset.is_disjoint(&self.readset) {
+						// Remove the transaction from the commit queue
+						self.database.transaction_commit_queue.remove(&version);
+						// Return the error for this transaction
+						return Err(Error::KeyReadConflict);
+					}
+					// A previous transaction has conflicts against scans
+					for k in tx.value().keyset.iter() {
+						// Check if this key may be within a scan range
+						if let Some(range) = self.scanset.range(..=k).next_back() {
+							// Check if the range includes this key
+							if range.1 > k {
+								// Remove the transaction from the commit queue
+								self.database.transaction_commit_queue.remove(&version);
+								// Return the error for this transaction
+								return Err(Error::KeyReadConflict);
+							}
 						}
 					}
 				}
 			}
 		}
-		// Clone the transaction modifications
-		let updates = self.writeset.clone();
-		// Acquire the lock, ensuring serialized transactions
-		let lock = self.database.transaction_merge_queue_lock.write();
-		// Increase the datastore sequence number
-		let version = self.database.oracle.next_timestamp();
-		// Add this transaction to the merge queue
-		self.database.transaction_merge_queue.insert(version, updates);
-		// Drop the transaction serialization lock
-		std::mem::drop(lock);
+		// Take ownership over the local modifications
+		let writeset = std::mem::take(&mut self.writeset);
+		// Insert this transaction into the merge queue
+		let (version, entry) = self.atomic_merge(Merge {
+			writeset,
+			id: self.database.transaction_merge_id.fetch_add(1, Ordering::SeqCst) + 1,
+		});
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
-		for (key, value) in std::mem::take(&mut self.writeset) {
+		for (key, value) in entry.writeset.iter() {
+			// Clone the value for insertion
+			let value = value.clone();
 			// Check if this key already exists
-			if iter.seek_exact(&key) {
+			if iter.seek_exact(key) {
 				// We know it exists, so we can unwrap
 				iter.next().unwrap().1.push(Version {
 					version,
@@ -267,7 +268,7 @@ where
 			} else {
 				// Otherwise insert a new entry into the tree
 				iter.insert(
-					key,
+					key.clone(),
 					SortedVec::from(vec![Version {
 						version,
 						value,
@@ -277,8 +278,6 @@ where
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
-		// Mark the transaction as done
-		entry.value().done.store(true, Ordering::SeqCst);
 		// Continue
 		Ok(())
 	}
@@ -298,8 +297,13 @@ where
 			Some(_) => true,
 			// Check for the key in the tree
 			None => {
+				// Check for the key in the datastore
 				let res = self.exists_in_datastore(key.borrow(), self.version);
-				self.readset.insert(key.into());
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					self.readset.insert(key.into());
+				}
+				// Return the result
 				res
 			}
 		};
@@ -337,8 +341,13 @@ where
 			Some(v) => v.clone(),
 			// Check for the key in the tree
 			None => {
+				// Fetch for the key from the datastore
 				let res = self.fetch_in_datastore(key.borrow(), self.version);
-				self.readset.insert(key.into());
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					self.readset.insert(key.into());
+				}
+				// Return the result
 				res
 			}
 		};
@@ -447,7 +456,7 @@ where
 
 	/// Retrieve a range of keys from the database
 	pub fn keys<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -460,7 +469,7 @@ where
 
 	/// Retrieve a range of keys from the database, in reverse order
 	pub fn keys_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -473,7 +482,7 @@ where
 
 	/// Retrieve a range of keys from the database at a specific version
 	pub fn keys_at_version<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -487,7 +496,7 @@ where
 
 	/// Retrieve a range of keys from the database at a specific version, in reverse order
 	pub fn keys_at_version_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -501,7 +510,7 @@ where
 
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -514,7 +523,7 @@ where
 
 	/// Retrieve a range of keys and values from the database in reverse order
 	pub fn scan_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -527,7 +536,7 @@ where
 
 	/// Retrieve a range of keys and values from the database at a specific version
 	pub fn scan_at_version<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -541,7 +550,7 @@ where
 
 	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
 	pub fn scan_at_version_reverse<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -555,7 +564,7 @@ where
 
 	/// Retrieve a range of keys and values from the databases
 	fn keys_any<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -579,14 +588,28 @@ where
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
-		// Add the entry to the scan range set
-		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
-			// Check if the range includes this key
-			if entry.value() < beg || entry.value() < end {
-				self.scanset.insert(beg.clone(), end.clone());
+		// Check wether we should track range scan reads
+		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				// Add this range scan entry to the saved scans
+				match self.scanset.range_mut(..=beg).next_back() {
+					// There is no entry for this range scan
+					None => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan stops before this range
+					Some(range) if &*range.1 < beg => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan does not extend far enough
+					Some(range) if &*range.1 < end => {
+						*range.1 = end.clone();
+					}
+					// This range scan is already covered
+					_ => (),
+				};
 			}
-		} else {
-			self.scanset.insert(beg.clone(), end.clone());
 		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
@@ -703,7 +726,7 @@ where
 
 	/// Retrieve a range of keys and values from the databases
 	fn scan_any<Q>(
-		&self,
+		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -727,14 +750,28 @@ where
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
-		// Add the entry to the scan range set
-		if let Some(entry) = self.scanset.upper_bound(Bound::Included(beg)) {
-			// Check if the range includes this key
-			if entry.value() < beg || entry.value() < end {
-				self.scanset.insert(beg.clone(), end.clone());
+		// Check wether we should track range scan reads
+		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				// Add this range scan entry to the saved scans
+				match self.scanset.range_mut(..=beg).next_back() {
+					// There is no entry for this range scan
+					None => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan stops before this range
+					Some(range) if &*range.1 < beg => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan does not extend far enough
+					Some(range) if &*range.1 < end => {
+						*range.1 = end.clone();
+					}
+					// This range scan is already covered
+					_ => (),
+				};
 			}
-		} else {
-			self.scanset.insert(beg.clone(), end.clone());
 		}
 		// Get raw iterators
 		let mut tree_iter = self.database.datastore.raw_iter();
@@ -850,18 +887,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Ensure we see committing transactions
-		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Drop the merge queue read lock quickly
-		std::mem::drop(lock);
 		// Check the current entry iteration
 		for entry in iter.rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				if let Some(v) = entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return the entry value
 					return v.clone();
 				}
@@ -889,18 +922,14 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Ensure we see committing transactions
-		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Drop the merge queue read lock quickly
-		std::mem::drop(lock);
 		// Check the current entry iteration
 		for entry in iter.rev() {
 			// There is a valid merge queue entry
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				if let Some(v) = entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return whether the entry exists
 					return v.is_some();
 				}
@@ -929,17 +958,13 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Ensure we see committing transactions
-		let lock = self.database.transaction_merge_queue_lock.read();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Drop the merge queue read lock quickly
-		std::mem::drop(lock);
 		// Check the current entry iteration
 		for entry in iter.rev() {
 			if !entry.is_removed() {
 				// Check if the entry has a key
-				if let Some(v) = entry.value().get(key.borrow()) {
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return whether the entry matches
 					return v == &chk;
 				}
@@ -962,6 +987,62 @@ where
 			// if the key is not present in
 			// the tree at all.
 			.flatten()
+	}
+
+	/// Atomimcally inserts the transaction into the commit queue
+	fn atomic_commit(&self, updates: Commit<K>) -> (u64, Arc<Commit<K>>) {
+		// Get the commit attempt id
+		let id = updates.id;
+		// Store the commit in an Arc
+		let updates = Arc::new(updates);
+		// Loop until the atomic operation is successful
+		loop {
+			// Clone the commit arc reference
+			let updates = Arc::clone(&updates);
+			// Get the database transaction merge queue
+			let queue = &self.database.transaction_commit_queue;
+			// Get the current commit queue number
+			let version = self.database.transaction_commit_id.load(Ordering::SeqCst) + 1;
+			// Insert into the queue if the number is the same
+			let entry = queue.compare_insert(version, updates, |v| id == v.id);
+			// Check if the entry was inserted correctly
+			if id == entry.value().id {
+				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
+				return (version, entry.value().clone());
+			}
+		}
+	}
+
+	/// Atomimcally inserts the transaction into the merge queue
+	fn atomic_merge(&self, updates: Merge<K, V>) -> (u64, Arc<Merge<K, V>>) {
+		// Get the commit attempt id
+		let id = updates.id;
+		// Store the commit in an Arc
+		let updates = Arc::new(updates);
+		// Get the database timestamp oracle
+		let oracle = self.database.oracle.clone();
+		// Get the current nanoseconds since the Unix epoch
+		let mut version = oracle.current_time_ns();
+		// Loop until we reach the next incremental timestamp
+		loop {
+			// Clone the commit arc reference
+			let updates = Arc::clone(&updates);
+			// Get the database transaction merge queue
+			let queue = &self.database.transaction_merge_queue;
+			// Get the last timestamp for this oracle
+			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
+			// Increase the timestamp to ensure monotonicity
+			if version <= last_ts {
+				version = last_ts + 1;
+			}
+			// Insert into the queue if the number is the same
+			let entry = queue.compare_insert(version, updates, |v| id == v.id);
+			// Check if the entry was inserted correctly
+			if id == entry.value().id {
+				oracle.inner.timestamp.store(version, Ordering::SeqCst);
+				return (version, entry.value().clone());
+			}
+		}
 	}
 }
 
@@ -1452,7 +1533,7 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let txn1 = db.transaction();
+		let mut txn1 = db.transaction();
 		let mut txn2 = db.transaction();
 
 		// k3 should not be visible to txn1

@@ -8,9 +8,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 const RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A timestamp oracle for monotonically increasing time
-pub struct Oracle {
+#[derive(Clone)]
+pub(crate) struct Oracle {
 	// The inner strcuture of an Oracle
-	inner: Arc<Inner>,
+	pub(crate) inner: Arc<Inner>,
 }
 
 impl Drop for Oracle {
@@ -20,15 +21,15 @@ impl Drop for Oracle {
 }
 
 /// The inner structure of the timestamp oracle
-struct Inner {
+pub(crate) struct Inner {
 	/// The latest monotonic counter for this oracle
-	timestamp: AtomicU64,
+	pub(crate) timestamp: AtomicU64,
 	/// The reference time when this Oracle was synced
-	reference: ArcSwap<(u64, Instant)>,
+	pub(crate) reference: ArcSwap<(u64, Instant)>,
 	/// Specifies whether timestamp syncing is enabled in the background
-	resync_enabled: AtomicBool,
+	pub(crate) resync_enabled: AtomicBool,
 	/// Stores a handle to the current timestamp syncing background thread
-	resync_handle: Mutex<Option<JoinHandle<()>>>,
+	pub(crate) resync_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Oracle {
@@ -58,32 +59,8 @@ impl Oracle {
 		self.inner.timestamp.load(Ordering::SeqCst)
 	}
 
-	/// Returns a monotonically increasing timestamp in nanoseconds
-	pub fn next_timestamp(&self) -> u64 {
-		// Get the current nanoseconds since the Unix epoch
-		let mut current_ts = self.current_time_ns();
-		// Loop until we reach the next incremental timestamp
-		loop {
-			// Get the last timestamp for this oracle
-			let last_ts = self.inner.timestamp.load(Ordering::Acquire);
-			// Increase the timestamp to ensure monotonicity
-			if current_ts <= last_ts {
-				current_ts = last_ts + 1;
-			}
-			// Try to update last_ts atomically
-			if self
-				.inner
-				.timestamp
-				.compare_exchange(last_ts, current_ts, Ordering::AcqRel, Ordering::Relaxed)
-				.is_ok()
-			{
-				return current_ts;
-			}
-		}
-	}
-
 	/// Gets the current system time in nanoseconds since the Unix epoch
-	fn current_unix_ns() -> u64 {
+	pub(crate) fn current_unix_ns() -> u64 {
 		// Get the current system time
 		let timestamp = SystemTime::now().duration_since(UNIX_EPOCH);
 		// Count the nanoseconds since the Unix epoch
@@ -91,7 +68,7 @@ impl Oracle {
 	}
 
 	/// Gets the current estimated time in nanoseconds since the Unix epoch
-	fn current_time_ns(&self) -> u64 {
+	pub(crate) fn current_time_ns(&self) -> u64 {
 		// Get the current reference time
 		let reference = self.inner.reference.load();
 		// Calculate the nanoseconds since the Unix epoch
