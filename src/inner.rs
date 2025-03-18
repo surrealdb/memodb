@@ -16,11 +16,10 @@
 
 use crate::oracle::Oracle;
 use crate::queue::{Commit, Merge};
-use crate::version::Version;
+use crate::versions::Versions;
 use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
-use sorted_vec::SortedVec;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
@@ -36,7 +35,7 @@ where
 	/// The timestamp version oracle
 	pub(crate) oracle: Oracle,
 	/// The underlying lock-free B+tree datastructure
-	pub(crate) datastore: BPlusTree<K, SortedVec<Version<V>>>,
+	pub(crate) datastore: BPlusTree<K, Versions<V>>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, AtomicU64>,
 	/// A count of total transactions grouped by commit id
