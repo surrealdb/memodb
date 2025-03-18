@@ -16,10 +16,10 @@
 
 use crate::direction::Direction;
 use crate::err::Error;
+use crate::inner::Inner;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
-use crate::Database;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -56,7 +56,7 @@ where
 	/// The local set of updates and deletes
 	writeset: BTreeMap<K, Option<V>>,
 	/// The parent database for this transaction
-	database: Database<K, V>,
+	database: Arc<Inner<K, V>>,
 }
 
 impl<K, V> Drop for Transaction<K, V>
@@ -68,9 +68,11 @@ where
 		// Fetch the transaction counter for this snapshot version
 		if let Some(entry) = self.database.counter_by_oracle.get(&self.version) {
 			// Decrement the transaction counter for this snapshot version
-			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
+			let total = entry.value().fetch_sub(1, Ordering::AcqRel);
+			// Get the current database oracle snapshot version
+			let current = self.database.oracle.current_timestamp();
 			// Check if we can clear up the transaction counter for this snapshot version
-			if total == 1 && self.database.oracle.current_timestamp() > self.version {
+			if total == 1 && current > self.version {
 				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the transaction entries up to this version
@@ -85,11 +87,11 @@ where
 		// Fetch the transaction counter for this commit queue id
 		if let Some(entry) = self.database.counter_by_commit.get(&self.commit) {
 			// Decrement the transaction counter for this commit queue id
-			let total = entry.value().fetch_sub(1, Ordering::SeqCst);
+			let total = entry.value().fetch_sub(1, Ordering::AcqRel);
+			// Get the current transaction commit queue id
+			let current = self.database.transaction_commit_id.load(Ordering::Acquire);
 			// Check if we can clear up the transaction counter for this commit queue id
-			if total == 1
-				&& self.database.transaction_commit_id.load(Ordering::SeqCst) > self.commit
-			{
+			if total == 1 && current > self.commit {
 				// Check if there are previous entries
 				if entry.prev().is_none() {
 					// Remove the counter entries up to this commit queue id
@@ -101,7 +103,7 @@ where
 						e.remove();
 					});
 				}
-				// Remove the transaction entry for this snapshot version
+				// Remove the transaction entry for this commit queue id
 				entry.remove();
 			}
 		}
@@ -114,7 +116,7 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Create a new read-only or writeable transaction
-	pub(crate) fn new(db: Database<K, V>) -> Transaction<K, V> {
+	pub(crate) fn new(db: Arc<Inner<K, V>>) -> Transaction<K, V> {
 		// Prepare and increment the oracle counter
 		let version = {
 			// Get the current version sequence number
@@ -122,18 +124,18 @@ where
 			// Initialise the transaction oracle counter
 			let count = db.counter_by_oracle.get_or_insert_with(value, || AtomicU64::new(1));
 			// Increment the transaction oracle counter
-			count.value().fetch_add(1, Ordering::SeqCst);
+			count.value().fetch_add(1, Ordering::AcqRel);
 			// Return the value
 			value
 		};
 		// Prepare and increment the commit counter
 		let commit = {
 			// Get the current commit sequence number
-			let value = db.transaction_commit_id.load(Ordering::SeqCst);
+			let value = db.transaction_commit_id.load(Ordering::Relaxed);
 			// Initialise the transaction commit counter
 			let count = db.counter_by_commit.get_or_insert_with(value, || AtomicU64::new(1));
 			// Increment the transaction commit counter
-			count.value().fetch_add(1, Ordering::SeqCst);
+			count.value().fetch_add(1, Ordering::AcqRel);
 			// Return the value
 			value
 		};
@@ -207,7 +209,7 @@ where
 		// Insert this transaction into the commit queue
 		let (version, entry) = self.atomic_commit(Commit {
 			keyset: self.writeset.keys().cloned().collect(),
-			id: self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1,
+			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
@@ -250,7 +252,7 @@ where
 		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
-			id: self.database.transaction_merge_id.fetch_add(1, Ordering::SeqCst) + 1,
+			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
 		// Get a mutable iterator over the tree
 		let mut iter = self.database.datastore.raw_iter_mut();
@@ -1002,12 +1004,12 @@ where
 			// Get the database transaction merge queue
 			let queue = &self.database.transaction_commit_queue;
 			// Get the current commit queue number
-			let version = self.database.transaction_commit_id.load(Ordering::SeqCst) + 1;
+			let version = self.database.transaction_commit_id.load(Ordering::Acquire) + 1;
 			// Insert into the queue if the number is the same
 			let entry = queue.compare_insert(version, updates, |v| id == v.id);
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
-				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
+				self.database.transaction_commit_id.fetch_add(1, Ordering::AcqRel);
 				return (version, entry.value().clone());
 			}
 		}
@@ -1039,7 +1041,7 @@ where
 			let entry = queue.compare_insert(version, updates, |v| id == v.id);
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
-				oracle.inner.timestamp.store(version, Ordering::SeqCst);
+				oracle.inner.timestamp.store(version, Ordering::Release);
 				return (version, entry.value().clone());
 			}
 		}
@@ -1049,12 +1051,11 @@ where
 #[cfg(test)]
 mod tests {
 
-	use super::*;
-	use crate::new;
+	use crate::Database;
 
 	#[test]
 	fn mvcc_non_conflicting_keys_should_succeed() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		let mut tx2 = db.transaction();
@@ -1070,7 +1071,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_conflicting_blind_writes_should_error() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		let mut tx2 = db.transaction();
@@ -1087,7 +1088,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_si_conflicting_read_keys_should_succeed() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction().with_snapshot_isolation();
 		let mut tx2 = db.transaction().with_snapshot_isolation();
@@ -1103,7 +1104,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_ssi_conflicting_read_keys_should_error() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction().with_serializable_snapshot_isolation();
 		let mut tx2 = db.transaction().with_serializable_snapshot_isolation();
@@ -1119,7 +1120,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_conflicting_write_keys_should_error() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		let mut tx2 = db.transaction();
@@ -1135,7 +1136,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_conflicting_read_deleted_keys_should_error() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		tx1.set("key", "value1").unwrap();
@@ -1155,7 +1156,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_scan_conflicting_write_keys_should_error() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		tx1.set("key1", "value1").unwrap();
@@ -1180,7 +1181,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_scan_conflicting_read_deleted_keys_should_error() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		tx1.set("key1", "value1").unwrap();
@@ -1204,7 +1205,7 @@ mod tests {
 
 	#[test]
 	fn mvcc_transaction_queue_correctness() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx1 = db.transaction();
 		tx1.set("key1", "value1").unwrap();
@@ -1252,7 +1253,7 @@ mod tests {
 
 	#[test]
 	fn test_snapshot_isolation() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 
 		let key1 = "key1";
 		let key2 = "key2";
@@ -1334,7 +1335,7 @@ mod tests {
 
 	#[test]
 	fn test_snapshot_isolation_scan() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 
 		let key1 = "key1";
 		let key2 = "key2";
@@ -1393,7 +1394,7 @@ mod tests {
 
 	// Common setup logic for creating anomaly tests database
 	fn new_db() -> Database<&'static str, &'static str> {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 
 		let key1 = "k1";
 		let key2 = "k2";

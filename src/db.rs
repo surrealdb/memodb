@@ -22,6 +22,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The interval at which garbage collection is performed
 const GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A transactional in-memory database
@@ -68,15 +69,6 @@ where
 	}
 }
 
-/// Create a new transactional in-memory database
-pub fn new<K, V>() -> Database<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
-	Database::default()
-}
-
 impl<K, V> Database<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
@@ -96,11 +88,11 @@ where
 	/// transactions. Effectively previous versions are cleaned
 	/// up and removed as soon as possible, whilst ensuring
 	/// that transaction snapshots still operate correctly.
-	pub fn with_gc(self) -> Database<K, V> {
+	pub fn with_gc(self) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = None;
 		// Start cleanup thread
-		self.worker_gc();
+		self.initialise_worker_gc();
 		// Return the database
 		self
 	}
@@ -116,33 +108,33 @@ where
 	/// removed if the transaction entries are older than the
 	/// specified duration, whilst ensuring that transaction
 	/// snapshots still operate correctly.
-	pub fn with_gc_history(self, history: Duration) -> Database<K, V> {
+	pub fn with_gc_history(self, history: Duration) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = Some(history);
 		// Start cleanup thread
-		self.worker_gc();
+		self.initialise_worker_gc();
 		// Return the database
 		self
 	}
 
 	/// Start a new transaction on this database
 	pub fn transaction(&self) -> Transaction<K, V> {
-		Transaction::new(self.clone())
+		Transaction::new(self.inner.clone())
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
 		// Disable garbage collection
-		self.inner.garbage_collection_enabled.store(false, Ordering::SeqCst);
+		self.garbage_collection_enabled.store(false, Ordering::Release);
 		// Wait for the garbage collector thread to exit
-		if let Some(handle) = self.inner.garbage_collection_handle.write().take() {
+		if let Some(handle) = self.garbage_collection_handle.write().take() {
 			handle.thread().unpark();
 			handle.join().unwrap();
 		}
 	}
 
-	/// Start the GC thread after creating the database
-	fn worker_gc(&self) {
+	/// Start the garbage collection thread after creating the database
+	pub(crate) fn initialise_worker_gc(&self) {
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
 		// Check if a background thread is already running
@@ -197,13 +189,13 @@ mod tests {
 
 	#[test]
 	fn begin_tx() {
-		let db: Database<Key, Val> = new();
+		let db: Database<Key, Val> = Database::new();
 		db.transaction();
 	}
 
 	#[test]
 	fn finished_tx_not_writeable() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		let res = tx.cancel();
@@ -222,7 +214,7 @@ mod tests {
 
 	#[test]
 	fn cancelled_tx_is_cancelled() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("test", "something").unwrap();
@@ -244,7 +236,7 @@ mod tests {
 
 	#[test]
 	fn committed_tx_is_committed() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("test", "something").unwrap();
@@ -266,7 +258,7 @@ mod tests {
 
 	#[test]
 	fn multiple_concurrent_readers() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("test", "something").unwrap();
@@ -297,7 +289,7 @@ mod tests {
 
 	#[test]
 	fn multiple_concurrent_operators() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("test", "something").unwrap();
@@ -340,7 +332,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_forward() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("a", "a").unwrap();
@@ -408,7 +400,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_reverse() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("a", "a").unwrap();
@@ -476,7 +468,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_values_forward() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("a", "a").unwrap();
@@ -544,7 +536,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_values_reverse() {
-		let db: Database<&str, &str> = new();
+		let db: Database<&str, &str> = Database::new();
 		// ----------
 		let mut tx = db.transaction();
 		tx.put("a", "a").unwrap();
