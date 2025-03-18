@@ -18,8 +18,8 @@ use crate::direction::Direction;
 use crate::err::Error;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
+use crate::versions::Versions;
 use crate::Database;
-use sorted_vec::SortedVec;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -269,10 +269,10 @@ where
 				// Otherwise insert a new entry into the tree
 				iter.insert(
 					key.clone(),
-					SortedVec::from(vec![Version {
+					Versions::from(Version {
 						version,
 						value,
-					}]),
+					}),
 				);
 			}
 		}

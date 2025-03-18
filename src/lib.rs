@@ -22,6 +22,7 @@ mod oracle;
 mod queue;
 mod tx;
 mod version;
+mod versions;
 
 #[cfg(test)]
 pub(crate) mod kv;

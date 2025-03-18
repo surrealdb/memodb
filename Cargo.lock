@@ -103,7 +103,7 @@ dependencies = [
  "bplustree",
  "crossbeam-skiplist",
  "parking_lot 0.12.3",
- "sorted-vec",
+ "smallvec",
  "thiserror",
 ]
 
@@ -202,12 +202,6 @@ name = "smallvec"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
-
-[[package]]
-name = "sorted-vec"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d372029cb5195f9ab4e4b9aef550787dce78b124fcaee8d82519925defcd6f0d"
 
 [[package]]
 name = "syn"
