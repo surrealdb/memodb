@@ -25,6 +25,9 @@ use std::time::Duration;
 /// The interval at which garbage collection is performed
 const GC_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The interval at which transaction queue cleanup is performed
+const CU_INTERVAL: Duration = Duration::from_millis(250);
+
 /// A transactional in-memory database
 #[derive(Clone)]
 pub struct Database<K, V>
@@ -75,8 +78,14 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Create a new transactional in-memory database
-	pub fn new() -> Database<K, V> {
-		Database::default()
+	pub fn new() -> Self {
+		// Create the database
+		let db = Database::default();
+		// Start background tasks
+		db.initialise_cleanup_worker();
+		db.initialise_garbage_worker();
+		// Return the database
+		db
 	}
 
 	/// Configure the database to use inactive garbage collection.
@@ -91,8 +100,6 @@ where
 	pub fn with_gc(self) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = None;
-		// Start cleanup thread
-		self.initialise_worker_gc();
 		// Return the database
 		self
 	}
@@ -111,8 +118,6 @@ where
 	pub fn with_gc_history(self, history: Duration) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = Some(history);
-		// Start cleanup thread
-		self.initialise_worker_gc();
 		// Return the database
 		self
 	}
@@ -124,8 +129,13 @@ where
 
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
-		// Disable garbage collection
-		self.garbage_collection_enabled.store(false, Ordering::Release);
+		// Disable background workers
+		self.background_threads_enabled.store(false, Ordering::Release);
+		// Wait for the garbage collector thread to exit
+		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
+			handle.thread().unpark();
+			handle.join().unwrap();
+		}
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.garbage_collection_handle.write().take() {
 			handle.thread().unpark();
@@ -133,8 +143,56 @@ where
 		}
 	}
 
+	/// Start the transaction commit queue cleanup thread after creating the database
+	fn initialise_cleanup_worker(&self) {
+		// Clone the underlying datastore inner
+		let db = self.inner.clone();
+		// Check if a background thread is already running
+		if db.transaction_cleanup_handle.read().is_none() {
+			// Spawn a new thread to handle periodic garbage collection
+			let handle = std::thread::spawn(move || {
+				// Check whether the garbage collection process is enabled
+				while db.background_threads_enabled.load(Ordering::SeqCst) {
+					// Wait for a specified time interval
+					std::thread::park_timeout(CU_INTERVAL);
+					{
+						// Get the current version sequence number
+						let value = db.oracle.current_timestamp();
+						// Iterate over transaction version counters
+						db.counter_by_oracle.range(..value).for_each(|e| {
+							if e.value().load(Ordering::Relaxed) == 0 {
+								e.remove();
+							}
+						});
+					}
+					{
+						// Get the current commit sequence number
+						let value = db.transaction_commit_id.load(Ordering::Relaxed);
+						// Iterate over transaction commit counters
+						db.counter_by_commit.range(..value).for_each(|e| {
+							if e.value().load(Ordering::Relaxed) == 0 {
+								e.remove();
+							}
+						});
+						// Get the oldest commit entry which is still active
+						if let Some(entry) = db.counter_by_commit.front() {
+							// Get the oldest commit version
+							let oldest = entry.key();
+							// Remove the commits up to this commit queue id from the transaction queue
+							db.transaction_commit_queue.range(..oldest).for_each(|e| {
+								e.remove();
+							});
+						}
+					}
+				}
+			});
+			// Store and track the thread handle
+			*self.inner.transaction_cleanup_handle.write() = Some(handle);
+		}
+	}
+
 	/// Start the garbage collection thread after creating the database
-	pub(crate) fn initialise_worker_gc(&self) {
+	fn initialise_garbage_worker(&self) {
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
 		// Check if a background thread is already running
@@ -142,7 +200,7 @@ where
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
-				while db.garbage_collection_enabled.load(Ordering::SeqCst) {
+				while db.background_threads_enabled.load(Ordering::SeqCst) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(GC_INTERVAL);
 					// Get the current timestamp version
