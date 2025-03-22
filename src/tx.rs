@@ -70,48 +70,10 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	fn drop(&mut self) {
-		// Fetch the transaction counter for this snapshot version
-		if let Some(entry) = self.database.counter_by_oracle.get(&self.version) {
-			// Decrement the transaction counter for this snapshot version
-			let total = entry.value().fetch_sub(1, Ordering::AcqRel);
-			// Get the current database oracle snapshot version
-			let current = self.database.oracle.current_timestamp();
-			// Check if we can clear up the transaction counter for this snapshot version
-			if total == 1 && current > self.version {
-				// Check if there are previous entries
-				if entry.prev().is_none() {
-					// Remove the transaction entries up to this version
-					self.database.counter_by_oracle.range(..=&self.version).for_each(|e| {
-						e.remove();
-					});
-				}
-				// Remove the transaction entry for this snapshot version
-				entry.remove();
-			}
-		}
-		// Fetch the transaction counter for this commit queue id
-		if let Some(entry) = self.database.counter_by_commit.get(&self.commit) {
-			// Decrement the transaction counter for this commit queue id
-			let total = entry.value().fetch_sub(1, Ordering::AcqRel);
-			// Get the current transaction commit queue id
-			let current = self.database.transaction_commit_id.load(Ordering::Acquire);
-			// Check if we can clear up the transaction counter for this commit queue id
-			if total == 1 && current > self.commit {
-				// Check if there are previous entries
-				if entry.prev().is_none() {
-					// Remove the counter entries up to this commit queue id
-					self.database.counter_by_commit.range(..=&self.commit).for_each(|e| {
-						e.remove();
-					});
-					// Remove the commits up to this commit queue id from the transaction queue
-					self.database.transaction_commit_queue.range(..=&self.commit).for_each(|e| {
-						e.remove();
-					});
-				}
-				// Remove the transaction entry for this commit queue id
-				entry.remove();
-			}
-		}
+		// Reduce the transaction commit counter
+		self.counter_commit.fetch_sub(1, Ordering::Relaxed);
+		// Reduce the transaction version counter
+		self.counter_version.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 

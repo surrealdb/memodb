@@ -52,8 +52,10 @@ where
 	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge<K, V>>>,
 	/// The epoch duration to determine how long to store versioned data
 	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
-	/// Specifies whether garbage collection is enabled in the background
-	pub(crate) garbage_collection_enabled: AtomicBool,
+	/// Specifies whether background worker threads are enabled
+	pub(crate) background_threads_enabled: AtomicBool,
+	/// Stores a handle to the current transaction cleanup background thread
+	pub(crate) transaction_cleanup_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Stores a handle to the current garbage collection background thread
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 }
@@ -75,7 +77,8 @@ where
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
 			garbage_collection_epoch: RwLock::new(None),
-			garbage_collection_enabled: AtomicBool::new(true),
+			background_threads_enabled: AtomicBool::new(true),
+			transaction_cleanup_handle: RwLock::new(None),
 			garbage_collection_handle: RwLock::new(None),
 		}
 	}
