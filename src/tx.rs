@@ -690,7 +690,7 @@ where
 							};
 						}
 						// Add this entry if it is not a delete
-						if sv.clone().is_some() {
+						if sv.is_some() {
 							if skip > 0 {
 								skip -= 1;
 							} else {
@@ -732,7 +732,7 @@ where
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
-					if sv.clone().is_some() {
+					if sv.is_some() {
 						if skip > 0 {
 							skip -= 1;
 						} else {
