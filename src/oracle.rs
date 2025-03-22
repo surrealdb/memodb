@@ -56,7 +56,7 @@ impl Oracle {
 
 	/// Returns the current timestamp for this oracle
 	pub fn current_timestamp(&self) -> u64 {
-		self.inner.timestamp.load(Ordering::SeqCst)
+		self.inner.timestamp.load(Ordering::Acquire)
 	}
 
 	/// Gets the current system time in nanoseconds since the Unix epoch
@@ -78,7 +78,7 @@ impl Oracle {
 	/// Shutdown the oracle resync, waiting for background threads to exit
 	fn shutdown(&self) {
 		// Disable timestamp resyncing
-		self.inner.resync_enabled.store(false, Ordering::SeqCst);
+		self.inner.resync_enabled.store(false, Ordering::Release);
 		// Wait for the timestamp resyncing thread to exit
 		if let Some(handle) = self.inner.resync_handle.lock().unwrap().take() {
 			handle.thread().unpark();
@@ -93,7 +93,7 @@ impl Oracle {
 		// Spawn a new thread to handle timestamp resyncing
 		let handle = std::thread::spawn(move || {
 			// Check whether the timestamp resync process is enabled
-			while oracle.resync_enabled.load(Ordering::SeqCst) {
+			while oracle.resync_enabled.load(Ordering::Acquire) {
 				// Wait for a specified time interval
 				std::thread::park_timeout(RESYNC_INTERVAL);
 				// Get the current unix time in nanoseconds
