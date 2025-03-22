@@ -601,4 +601,36 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
+
+	#[test]
+	fn count_keys_values() {
+		let db: Database<&str, &str> = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.count("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res, 10);
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.count("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res, 10);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
 }
