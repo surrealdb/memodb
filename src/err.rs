@@ -36,4 +36,7 @@ pub enum Error {
 
 	#[error("Write conflict, retry the transaction")]
 	KeyWriteConflict,
+
+	#[error("Can not fetch value at a future version")]
+	VersionInFuture,
 }

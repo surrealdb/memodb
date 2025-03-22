@@ -323,6 +323,10 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
+		// Check the specified key version
+		if self.version <= version {
+			return Err(Error::VersionInFuture);
+		}
 		// Check the key
 		let res = self.exists_in_datastore(key.borrow(), version);
 		// Return result
@@ -371,6 +375,10 @@ where
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
+		}
+		// Check the specified key version
+		if self.version <= version {
+			return Err(Error::VersionInFuture);
 		}
 		// Get the key
 		let res = self.fetch_in_datastore(key.borrow(), version);
