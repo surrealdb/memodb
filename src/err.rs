@@ -22,6 +22,9 @@ pub enum Error {
 	#[error("Transaction is closed")]
 	TxClosed,
 
+	#[error("Transaction is not writable")]
+	TxNotWritable,
+
 	#[error("Key being inserted already exists")]
 	KeyAlreadyExists,
 

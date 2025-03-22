@@ -30,7 +30,6 @@ use std::sync::Arc;
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
 pub enum IsolationLevel {
-	WriteCommitted,
 	SnapshotIsolation,
 	SerializableSnapshotIsolation,
 }
@@ -45,6 +44,8 @@ where
 	mode: IsolationLevel,
 	/// Is the transaction complete?
 	done: bool,
+	/// Is the transaction writeable?
+	write: bool,
 	/// The version at which this transaction started
 	commit: u64,
 	/// The version at which this transaction started
@@ -116,7 +117,7 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// Create a new read-only or writeable transaction
-	pub(crate) fn new(db: Arc<Inner<K, V>>) -> Transaction<K, V> {
+	pub(crate) fn new(db: Arc<Inner<K, V>>, write: bool) -> Transaction<K, V> {
 		// Prepare and increment the oracle counter
 		let version = {
 			// Get the current version sequence number
@@ -143,6 +144,7 @@ where
 		Transaction {
 			mode: IsolationLevel::SerializableSnapshotIsolation,
 			done: false,
+			write,
 			commit,
 			version,
 			readset: BTreeSet::new(),
@@ -150,12 +152,6 @@ where
 			writeset: BTreeMap::new(),
 			database: db,
 		}
-	}
-
-	/// Ensure this transaction is committed with write committed guarantees
-	pub fn with_write_committed(mut self) -> Self {
-		self.mode = IsolationLevel::WriteCommitted;
-		self
 	}
 
 	/// Ensure this transaction is committed with snapshot isolation guarantees
@@ -293,21 +289,26 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Check the key
-		let res = match self.writeset.get(key.borrow()) {
-			// The key exists in the writeset
-			Some(_) => true,
-			// Check for the key in the tree
-			None => {
-				// Check for the key in the datastore
-				let res = self.exists_in_datastore(key.borrow(), self.version);
-				// Check whether we should track key reads
-				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-					self.readset.insert(key.into());
+		// Check the transaction type
+		let res = match self.write {
+			// This is a writeable transaction
+			true => match self.writeset.get(key.borrow()) {
+				// The key exists in the writeset
+				Some(_) => true,
+				// Check for the key in the tree
+				None => {
+					// Fetch for the key from the datastore
+					let res = self.exists_in_datastore(key.borrow(), self.version);
+					// Check whether we should track key reads
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+						self.readset.insert(key.into());
+					}
+					// Return the result
+					res
 				}
-				// Return the result
-				res
-			}
+			},
+			// This is a readonly transaction
+			false => self.exists_in_datastore(key.borrow(), self.version),
 		};
 		// Return result
 		Ok(res)
@@ -337,21 +338,26 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Get the key
-		let res = match self.writeset.get(key.borrow()) {
-			// The key exists in the writeset
-			Some(v) => v.clone(),
-			// Check for the key in the tree
-			None => {
-				// Fetch for the key from the datastore
-				let res = self.fetch_in_datastore(key.borrow(), self.version);
-				// Check whether we should track key reads
-				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-					self.readset.insert(key.into());
+		// Check the transaction type
+		let res = match self.write {
+			// This is a writeable transaction
+			true => match self.writeset.get(key.borrow()) {
+				// The key exists in the writeset
+				Some(v) => v.clone(),
+				// Check for the key in the tree
+				None => {
+					// Fetch for the key from the datastore
+					let res = self.fetch_in_datastore(key.borrow(), self.version);
+					// Check whether we should track key reads
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+						self.readset.insert(key.into());
+					}
+					// Return the result
+					res
 				}
-				// Return the result
-				res
-			}
+			},
+			// This is a readonly transaction
+			false => self.fetch_in_datastore(key.borrow(), self.version),
 		};
 		// Return result
 		Ok(res)
@@ -381,6 +387,10 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
+		}
 		// Set the key
 		self.writeset.insert(key.into(), Some(val));
 		// Return result
@@ -395,6 +405,10 @@ where
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
+		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
 		}
 		// Set the key
 		match self.exists_in_datastore(key.borrow(), self.version) {
@@ -414,6 +428,10 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
+		}
 		// Set the key
 		match self.equals_in_datastore(key.borrow(), chk, self.version) {
 			true => self.writeset.insert(key.into(), Some(val)),
@@ -432,6 +450,10 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
+		}
 		// Remove the key
 		self.writeset.insert(key.into(), None);
 		// Return result
@@ -446,6 +468,10 @@ where
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
+		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
 		match self.equals_in_datastore(key.borrow(), chk, self.version) {
@@ -591,7 +617,7 @@ where
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
-		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
 				// Add this range scan entry to the saved scans
@@ -664,7 +690,7 @@ where
 							};
 						}
 						// Add this entry if it is not a delete
-						if sv.clone().is_some() {
+						if sv.is_some() {
 							if skip > 0 {
 								skip -= 1;
 							} else {
@@ -706,7 +732,7 @@ where
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
-					if sv.clone().is_some() {
+					if sv.is_some() {
 						if skip > 0 {
 							skip -= 1;
 						} else {
@@ -753,7 +779,7 @@ where
 		// Calculate how many items to skip
 		let mut skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
-		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
 				// Add this range scan entry to the saved scans
@@ -1057,8 +1083,8 @@ mod tests {
 	fn mvcc_non_conflicting_keys_should_succeed() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
-		let mut tx2 = db.transaction();
+		let mut tx1 = db.transaction(true);
+		let mut tx2 = db.transaction(true);
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1073,8 +1099,8 @@ mod tests {
 	fn mvcc_conflicting_blind_writes_should_error() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
-		let mut tx2 = db.transaction();
+		let mut tx1 = db.transaction(true);
+		let mut tx2 = db.transaction(true);
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1090,8 +1116,8 @@ mod tests {
 	fn mvcc_si_conflicting_read_keys_should_succeed() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction().with_snapshot_isolation();
-		let mut tx2 = db.transaction().with_snapshot_isolation();
+		let mut tx1 = db.transaction(true).with_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_snapshot_isolation();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1106,8 +1132,8 @@ mod tests {
 	fn mvcc_ssi_conflicting_read_keys_should_error() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction().with_serializable_snapshot_isolation();
-		let mut tx2 = db.transaction().with_serializable_snapshot_isolation();
+		let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_serializable_snapshot_isolation();
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1122,8 +1148,8 @@ mod tests {
 	fn mvcc_conflicting_write_keys_should_error() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
-		let mut tx2 = db.transaction();
+		let mut tx1 = db.transaction(true);
+		let mut tx2 = db.transaction(true);
 		// ----------
 		assert!(tx1.get("key1").unwrap().is_none());
 		tx1.set("key1", "value1").unwrap();
@@ -1138,12 +1164,12 @@ mod tests {
 	fn mvcc_conflicting_read_deleted_keys_should_error() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
+		let mut tx1 = db.transaction(true);
 		tx1.set("key", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		// ----------
-		let mut tx2 = db.transaction();
-		let mut tx3 = db.transaction();
+		let mut tx2 = db.transaction(true);
+		let mut tx3 = db.transaction(true);
 		// ----------
 		assert!(tx2.get("key").unwrap().is_some());
 		tx2.del("key").unwrap();
@@ -1158,12 +1184,12 @@ mod tests {
 	fn mvcc_scan_conflicting_write_keys_should_error() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
+		let mut tx1 = db.transaction(true);
 		tx1.set("key1", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		// ----------
-		let mut tx2 = db.transaction();
-		let mut tx3 = db.transaction();
+		let mut tx2 = db.transaction(true);
+		let mut tx3 = db.transaction(true);
 		// ----------
 		tx2.set("key1", "value4").unwrap();
 		tx2.set("key2", "value2").unwrap();
@@ -1183,12 +1209,12 @@ mod tests {
 	fn mvcc_scan_conflicting_read_deleted_keys_should_error() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
+		let mut tx1 = db.transaction(true);
 		tx1.set("key1", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		// ----------
-		let mut tx2 = db.transaction();
-		let mut tx3 = db.transaction();
+		let mut tx2 = db.transaction(true);
+		let mut tx3 = db.transaction(true);
 		// ----------
 		tx2.del("key1").unwrap();
 		assert!(tx2.commit().is_ok());
@@ -1207,20 +1233,20 @@ mod tests {
 	fn mvcc_transaction_queue_correctness() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx1 = db.transaction();
+		let mut tx1 = db.transaction(true);
 		tx1.set("key1", "value1").unwrap();
 		assert!(tx1.commit().is_ok());
 		std::mem::drop(tx1);
 		// ----------
-		let mut tx2 = db.transaction();
+		let mut tx2 = db.transaction(true);
 		tx2.set("key2", "value2").unwrap();
 		assert!(tx2.commit().is_ok());
 		std::mem::drop(tx2);
 		// ----------
-		let mut tx3 = db.transaction();
+		let mut tx3 = db.transaction(true);
 		tx3.set("key", "value").unwrap();
 		// ----------
-		let mut tx4 = db.transaction();
+		let mut tx4 = db.transaction(true);
 		tx4.set("key", "value").unwrap();
 		// ----------
 		assert!(tx3.commit().is_ok());
@@ -1228,10 +1254,10 @@ mod tests {
 		std::mem::drop(tx3);
 		std::mem::drop(tx4);
 		// ----------
-		let mut tx5 = db.transaction();
+		let mut tx5 = db.transaction(true);
 		tx5.set("key", "other").unwrap();
 		// ----------
-		let mut tx6 = db.transaction();
+		let mut tx6 = db.transaction(true);
 		tx6.set("key", "other").unwrap();
 		// ----------
 		assert!(tx5.commit().is_ok());
@@ -1239,10 +1265,10 @@ mod tests {
 		std::mem::drop(tx5);
 		std::mem::drop(tx6);
 		// ----------
-		let mut tx7 = db.transaction();
+		let mut tx7 = db.transaction(true);
 		tx7.set("key", "change").unwrap();
 		// ----------
-		let mut tx8 = db.transaction();
+		let mut tx8 = db.transaction(true);
 		tx8.set("key", "change").unwrap();
 		// ----------
 		assert!(tx7.commit().is_ok());
@@ -1262,8 +1288,8 @@ mod tests {
 
 		// no conflict
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			txn1.set(key1, value1).unwrap();
 			txn1.commit().unwrap();
@@ -1275,8 +1301,8 @@ mod tests {
 
 		// conflict when the read key was updated by another transaction
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			txn1.set(key1, value1).unwrap();
 			txn1.commit().unwrap();
@@ -1288,8 +1314,8 @@ mod tests {
 
 		// blind writes should not succeed
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			txn1.set(key1, value1).unwrap();
 			txn2.set(key1, value2).unwrap();
@@ -1302,8 +1328,8 @@ mod tests {
 		{
 			let key = "key3";
 
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			txn1.set(key, value1).unwrap();
 			txn1.commit().unwrap();
@@ -1317,12 +1343,12 @@ mod tests {
 		{
 			let key = "key4";
 
-			let mut txn1 = db.transaction();
+			let mut txn1 = db.transaction(true);
 			txn1.set(key, value1).unwrap();
 			txn1.commit().unwrap();
 
-			let mut txn2 = db.transaction();
-			let mut txn3 = db.transaction();
+			let mut txn2 = db.transaction(true);
+			let mut txn3 = db.transaction(true);
 
 			txn2.del(key).unwrap();
 			assert!(txn2.commit().is_ok());
@@ -1350,13 +1376,13 @@ mod tests {
 
 		// conflict when scan keys have been updated in another transaction
 		{
-			let mut txn1 = db.transaction();
+			let mut txn1 = db.transaction(true);
 
 			txn1.set(key1, value1).unwrap();
 			txn1.commit().unwrap();
 
-			let mut txn2 = db.transaction();
-			let mut txn3 = db.transaction();
+			let mut txn2 = db.transaction(true);
+			let mut txn3 = db.transaction(true);
 
 			txn2.set(key1, value4).unwrap();
 			txn2.set(key2, value2).unwrap();
@@ -1374,13 +1400,13 @@ mod tests {
 
 		// write-skew: read conflict when read keys are deleted by other transaction
 		{
-			let mut txn1 = db.transaction();
+			let mut txn1 = db.transaction(true);
 
 			txn1.set(key4, value1).unwrap();
 			txn1.commit().unwrap();
 
-			let mut txn2 = db.transaction();
-			let mut txn3 = db.transaction();
+			let mut txn2 = db.transaction(true);
+			let mut txn3 = db.transaction(true);
 
 			txn2.del(key4).unwrap();
 			txn2.commit().unwrap();
@@ -1401,7 +1427,7 @@ mod tests {
 		let value1 = "v1";
 		let value2 = "v2";
 		// Start a new read-write transaction (txn)
-		let mut txn = db.transaction();
+		let mut txn = db.transaction(true);
 		txn.set(key1, value1).unwrap();
 		txn.set(key2, value2).unwrap();
 		txn.commit().unwrap();
@@ -1421,8 +1447,8 @@ mod tests {
 		let value6 = "v6";
 
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			assert!(txn1.get(key1).is_ok());
 			assert!(txn1.get(key2).is_ok());
@@ -1441,7 +1467,7 @@ mod tests {
 		}
 
 		{
-			let mut txn3 = db.transaction();
+			let mut txn3 = db.transaction(true);
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value3);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1460,8 +1486,8 @@ mod tests {
 		let value3 = "v3";
 
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			assert!(txn1.get(key1).is_ok());
 
@@ -1482,7 +1508,7 @@ mod tests {
 		}
 
 		{
-			let mut txn3 = db.transaction();
+			let mut txn3 = db.transaction(true);
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value1);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -1501,8 +1527,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn1.get(key2).is_ok());
@@ -1534,8 +1560,8 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		// k3 should not be visible to txn1
 		let range = "k1".."k3";
@@ -1564,8 +1590,8 @@ mod tests {
 		let key1 = "k1";
 		let value3 = "v3";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn2.get(key1).is_ok());
@@ -1589,8 +1615,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 		assert_eq!(txn2.get(key1).unwrap().unwrap(), value1);
@@ -1616,8 +1642,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 
@@ -1649,8 +1675,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 		let range = "k1".."k2";
@@ -1681,8 +1707,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn2.get(key2).is_ok());
@@ -1707,8 +1733,8 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		assert!(txn1.get(key1).is_ok());
 		txn1.set(key1, &value3).unwrap();
@@ -1740,8 +1766,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		let mut txn1 = db.transaction();
-		let mut txn2 = db.transaction();
+		let mut txn1 = db.transaction(true);
+		let mut txn2 = db.transaction(true);
 
 		let range = "k1".."k2";
 		let res = txn1.scan(range.clone(), None, None).expect("Scan should succeed");
@@ -1776,8 +1802,8 @@ mod tests {
 
 		// inserts into read ranges of already-committed transaction(s) should fail
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			let range = "k1".."k4";
 			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
@@ -1794,8 +1820,8 @@ mod tests {
 		// k1, k2, k3 already committed
 		// inserts beyond scan range should pass
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			let range = "k1".."k3";
 			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
@@ -1811,8 +1837,8 @@ mod tests {
 		// k1, k2, k3, k4, k5 already committed
 		// inserts in subset scan ranges should fail
 		{
-			let mut txn1 = db.transaction();
-			let mut txn2 = db.transaction();
+			let mut txn1 = db.transaction(true);
+			let mut txn2 = db.transaction(true);
 
 			let range = "k1".."k7";
 			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
