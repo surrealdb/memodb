@@ -465,7 +465,7 @@ where
 	}
 
 	/// Retrieve a count of keys from the database
-	pub fn count<Q>(
+	pub fn total<Q>(
 		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
@@ -474,11 +474,11 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		self.count_any(rng, skip, limit, Direction::Forward, self.version)
+		self.total_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
 	/// Retrieve a count of keys from the database at a specific version
-	pub fn count_at_version<Q>(
+	pub fn total_at_version<Q>(
 		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,
@@ -488,7 +488,7 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		self.count_any(rng, skip, limit, Direction::Forward, version)
+		self.total_any(rng, skip, limit, Direction::Forward, version)
 	}
 
 	/// Retrieve a range of keys from the database
@@ -600,7 +600,7 @@ where
 	}
 
 	/// Retrieve a count of keys from the database
-	fn count_any<Q>(
+	fn total_any<Q>(
 		&mut self,
 		rng: Range<Q>,
 		skip: Option<usize>,

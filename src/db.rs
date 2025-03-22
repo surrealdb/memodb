@@ -680,13 +680,13 @@ mod tests {
 		tx.put("m", "m").unwrap();
 		tx.put("n", "n").unwrap();
 		tx.put("o", "o").unwrap();
-		let res = tx.count("c".."z", None, Some(10)).unwrap();
+		let res = tx.total("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res, 10);
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction(false);
-		let res = tx.count("c".."z", Some(3), Some(10)).unwrap();
+		let res = tx.total("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res, 10);
 		let res = tx.cancel();
 		assert!(res.is_ok());
