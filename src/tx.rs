@@ -1079,6 +1079,7 @@ where
 	}
 
 	/// Fetch a key if it exists in the datastore only
+	#[inline(always)]
 	fn fetch_in_datastore<Q>(&self, key: Q, version: u64) -> Option<V>
 	where
 		Q: Borrow<K>,
@@ -1114,6 +1115,7 @@ where
 	}
 
 	/// Check if a key exists in the datastore only
+	#[inline(always)]
 	fn exists_in_datastore<Q>(&self, key: Q, version: u64) -> bool
 	where
 		Q: Borrow<K>,
@@ -1150,6 +1152,7 @@ where
 	}
 
 	/// Check if a key equals a value in the datastore only
+	#[inline(always)]
 	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<V>, version: u64) -> bool
 	where
 		Q: Borrow<K>,
@@ -1186,6 +1189,7 @@ where
 	}
 
 	/// Atomimcally inserts the transaction into the commit queue
+	#[inline(always)]
 	fn atomic_commit(&self, updates: Commit<K>) -> (u64, Arc<Commit<K>>) {
 		// Get the commit attempt id
 		let id = updates.id;
@@ -1210,6 +1214,7 @@ where
 	}
 
 	/// Atomimcally inserts the transaction into the merge queue
+	#[inline(always)]
 	fn atomic_merge(&self, updates: Merge<K, V>) -> (u64, Arc<Merge<K, V>>) {
 		// Get the commit attempt id
 		let id = updates.id;
