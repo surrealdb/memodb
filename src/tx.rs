@@ -490,6 +490,33 @@ where
 		Ok(())
 	}
 
+	/// Retrieve a count of keys from the database
+	pub fn count<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<usize, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.count_any(rng, skip, limit, Direction::Forward, self.version)
+	}
+
+	/// Retrieve a count of keys from the database at a specific version
+	pub fn count_at_version<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<usize, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.count_any(rng, skip, limit, Direction::Forward, version)
+	}
+
 	/// Retrieve a range of keys from the database
 	pub fn keys<Q>(
 		&mut self,
@@ -598,7 +625,166 @@ where
 		self.scan_any(rng, skip, limit, Direction::Reverse, version)
 	}
 
-	/// Retrieve a range of keys and values from the databases
+	/// Retrieve a count of keys from the database
+	fn count_any<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<usize, Error>
+	where
+		Q: Borrow<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Prepare result vector
+		let mut res = 0;
+		// Compute the range
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
+		// Calculate how many items to skip
+		let mut skip = skip.unwrap_or_default();
+		// Check wether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				// Add this range scan entry to the saved scans
+				match self.scanset.range_mut(..=beg).next_back() {
+					// There is no entry for this range scan
+					None => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan stops before this range
+					Some(range) if &*range.1 < beg => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan does not extend far enough
+					Some(range) if &*range.1 < end => {
+						*range.1 = end.clone();
+					}
+					// This range scan is already covered
+					_ => (),
+				};
+			}
+		}
+		// Get raw iterators
+		let mut tree_iter = self.database.datastore.raw_iter();
+		let mut self_iter = self.writeset.range(beg..end);
+		// Seek to the start of the scan range
+		match direction {
+			Direction::Forward => tree_iter.seek(beg),
+			Direction::Reverse => tree_iter.seek_for_prev(end),
+		};
+		// Get the first items manually
+		let (mut tree_next, mut self_next) = match direction {
+			Direction::Forward => (tree_iter.next(), self_iter.next()),
+			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+		};
+		// Merge results until limit is reached
+		while limit.is_none() || limit.is_some_and(|l| res < l) {
+			match (tree_next, self_next) {
+				// Both iterators have items, we need to compare
+				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+					if tk <= sk && tk != sk {
+						// Add this entry if it is not a delete
+						if tv
+							// Iterate through the entry versions
+							.iter()
+							// Reverse iterate through the versions
+							.rev()
+							// Get the version prior to this transaction
+							.find(|v| v.version <= version)
+							// Check if there is a version prior to this transaction
+							.is_some_and(|v| {
+								// Check if the found entry is a deleted version
+								v.value.is_some()
+							}) {
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res += 1;
+							}
+						}
+						tree_next = match direction {
+							Direction::Forward => tree_iter.next(),
+							Direction::Reverse => tree_iter.prev(),
+						};
+					} else {
+						// Advance the tree if the keys match
+						if tk == sk {
+							tree_next = match direction {
+								Direction::Forward => tree_iter.next(),
+								Direction::Reverse => tree_iter.prev(),
+							};
+						}
+						// Add this entry if it is not a delete
+						if sv.is_some() {
+							if skip > 0 {
+								skip -= 1;
+							} else {
+								res += 1;
+							}
+						}
+						self_next = match direction {
+							Direction::Forward => self_iter.next(),
+							Direction::Reverse => self_iter.next_back(),
+						};
+					}
+				}
+				// Only the left iterator has any items
+				(Some((tk, tv)), _) if tk <= end => {
+					// Add this entry if it is not a delete
+					if tv
+						// Iterate through the entry versions
+						.iter()
+						// Reverse iterate through the versions
+						.rev()
+						// Get the version prior to this transaction
+						.find(|v| v.version <= version)
+						// Check if there is a version prior to this transaction
+						.is_some_and(|v| {
+							// Check if the found entry is a deleted version
+							v.value.is_some()
+						}) {
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res += 1;
+						}
+					}
+					tree_next = match direction {
+						Direction::Forward => tree_iter.next(),
+						Direction::Reverse => tree_iter.prev(),
+					};
+				}
+				// Only the right iterator has any items
+				(_, Some((sk, sv))) if sk <= end => {
+					// Add this entry if it is not a delete
+					if sv.is_some() {
+						if skip > 0 {
+							skip -= 1;
+						} else {
+							res += 1;
+						}
+					}
+					self_next = match direction {
+						Direction::Forward => self_iter.next(),
+						Direction::Reverse => self_iter.next_back(),
+					};
+				}
+				// Both iterators are exhausted
+				_ => break,
+			}
+		}
+		// Return result
+		Ok(res)
+	}
+
+	/// Retrieve a range of keys from the database
 	fn keys_any<Q>(
 		&mut self,
 		rng: Range<Q>,
@@ -760,7 +946,7 @@ where
 		Ok(res)
 	}
 
-	/// Retrieve a range of keys and values from the databases
+	/// Retrieve a range of keys and values from the database
 	fn scan_any<Q>(
 		&mut self,
 		rng: Range<Q>,
