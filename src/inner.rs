@@ -37,9 +37,9 @@ where
 	/// The underlying lock-free B+tree datastructure
 	pub(crate) datastore: BPlusTree<K, Versions<V>>,
 	/// A count of total transactions grouped by oracle version
-	pub(crate) counter_by_oracle: SkipMap<u64, AtomicU64>,
+	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
-	pub(crate) counter_by_commit: SkipMap<u64, AtomicU64>,
+	pub(crate) counter_by_commit: SkipMap<u64, Arc<AtomicU64>>,
 	/// The transaction commit queue attempt sequence number
 	pub(crate) transaction_queue_id: AtomicU64,
 	/// The transaction commit queue success sequence number

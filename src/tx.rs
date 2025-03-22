@@ -58,6 +58,10 @@ where
 	writeset: BTreeMap<K, Option<V>>,
 	/// The parent database for this transaction
 	database: Arc<Inner<K, V>>,
+	/// The reference to the transaction commit counter
+	counter_commit: Arc<AtomicU64>,
+	/// The reference to the transaction version counter
+	counter_version: Arc<AtomicU64>,
 }
 
 impl<K, V> Drop for Transaction<K, V>
@@ -119,26 +123,32 @@ where
 	/// Create a new read-only or writeable transaction
 	pub(crate) fn new(db: Arc<Inner<K, V>>, write: bool) -> Transaction<K, V> {
 		// Prepare and increment the oracle counter
-		let version = {
+		let (version, counter_version) = {
 			// Get the current version sequence number
 			let value = db.oracle.current_timestamp();
 			// Initialise the transaction oracle counter
-			let count = db.counter_by_oracle.get_or_insert_with(value, || AtomicU64::new(1));
+			let entry =
+				db.counter_by_oracle.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
+			// Fetch the underlying counter for this value
+			let counter = entry.value().clone();
 			// Increment the transaction oracle counter
-			count.value().fetch_add(1, Ordering::AcqRel);
+			counter.fetch_add(1, Ordering::Relaxed);
 			// Return the value
-			value
+			(value, counter)
 		};
 		// Prepare and increment the commit counter
-		let commit = {
+		let (commit, counter_commit) = {
 			// Get the current commit sequence number
 			let value = db.transaction_commit_id.load(Ordering::Relaxed);
 			// Initialise the transaction commit counter
-			let count = db.counter_by_commit.get_or_insert_with(value, || AtomicU64::new(1));
+			let entry =
+				db.counter_by_commit.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
+			// Fetch the underlying counter for this value
+			let counter = entry.value().clone();
 			// Increment the transaction commit counter
-			count.value().fetch_add(1, Ordering::AcqRel);
+			counter.fetch_add(1, Ordering::Relaxed);
 			// Return the value
-			value
+			(value, counter)
 		};
 		// Create the read only transaction
 		Transaction {
@@ -151,6 +161,8 @@ where
 			scanset: BTreeMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
+			counter_commit,
+			counter_version,
 		}
 	}
 
