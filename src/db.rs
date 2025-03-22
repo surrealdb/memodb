@@ -118,8 +118,8 @@ where
 	}
 
 	/// Start a new transaction on this database
-	pub fn transaction(&self) -> Transaction<K, V> {
-		Transaction::new(self.inner.clone())
+	pub fn transaction(&self, write: bool) -> Transaction<K, V> {
+		Transaction::new(self.inner.clone(), write)
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit
@@ -190,14 +190,14 @@ mod tests {
 	#[test]
 	fn begin_tx() {
 		let db: Database<Key, Val> = Database::new();
-		db.transaction();
+		db.transaction(false);
 	}
 
 	#[test]
 	fn finished_tx_not_writeable() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		let res = tx.put("test", "something");
@@ -216,7 +216,7 @@ mod tests {
 	fn cancelled_tx_is_cancelled() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -225,7 +225,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.exists("test").unwrap();
 		assert!(!res);
 		let res = tx.get("test").unwrap();
@@ -238,7 +238,7 @@ mod tests {
 	fn committed_tx_is_committed() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -247,7 +247,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
@@ -260,7 +260,7 @@ mod tests {
 	fn multiple_concurrent_readers() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -269,13 +269,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.transaction();
+		let mut tx1 = db.transaction(false);
 		let res = tx1.exists("test").unwrap();
 		assert!(res);
 		let res = tx1.exists("temp").unwrap();
 		assert!(!res);
 		// ----------
-		let mut tx2 = db.transaction();
+		let mut tx2 = db.transaction(false);
 		let res = tx2.exists("test").unwrap();
 		assert!(res);
 		let res = tx2.exists("temp").unwrap();
@@ -291,7 +291,7 @@ mod tests {
 	fn multiple_concurrent_operators() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
@@ -300,13 +300,13 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx1 = db.transaction();
+		let mut tx1 = db.transaction(false);
 		let res = tx1.exists("test").unwrap();
 		assert!(res);
 		let res = tx1.exists("temp").unwrap();
 		assert!(!res);
 		// ----------
-		let mut txw = db.transaction();
+		let mut txw = db.transaction(true);
 		txw.put("temp", "other").unwrap();
 		let res = txw.exists("test").unwrap();
 		assert!(res);
@@ -315,7 +315,7 @@ mod tests {
 		let res = txw.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx2 = db.transaction();
+		let mut tx2 = db.transaction(false);
 		let res = tx2.exists("test").unwrap();
 		assert!(res);
 		let res = tx2.exists("temp").unwrap();
@@ -334,7 +334,7 @@ mod tests {
 	fn iterate_keys_forward() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -365,7 +365,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.keys("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "c");
@@ -381,7 +381,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.keys("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "f");
@@ -402,7 +402,7 @@ mod tests {
 	fn iterate_keys_reverse() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -433,7 +433,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.keys_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "o");
@@ -449,7 +449,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.keys_reverse("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], "l");
@@ -470,7 +470,7 @@ mod tests {
 	fn iterate_keys_values_forward() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -501,7 +501,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.scan("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("c", "c"));
@@ -517,7 +517,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.scan("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("f", "f"));
@@ -538,7 +538,7 @@ mod tests {
 	fn iterate_keys_values_reverse() {
 		let db: Database<&str, &str> = Database::new();
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
 		tx.put("b", "b").unwrap();
 		tx.put("c", "c").unwrap();
@@ -569,7 +569,7 @@ mod tests {
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("o", "o"));
@@ -585,7 +585,7 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
-		let mut tx = db.transaction();
+		let mut tx = db.transaction(false);
 		let res = tx.scan_reverse("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
 		assert_eq!(res[0], ("l", "l"));
