@@ -33,7 +33,7 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	/// The timestamp version oracle
-	pub(crate) oracle: Oracle,
+	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free B+tree datastructure
 	pub(crate) datastore: BPlusTree<K, Versions<V>>,
 	/// A count of total transactions grouped by oracle version

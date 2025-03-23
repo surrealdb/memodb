@@ -8,7 +8,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 const RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A timestamp oracle for monotonically increasing time
-#[derive(Clone)]
 pub(crate) struct Oracle {
 	// The inner strcuture of an Oracle
 	pub(crate) inner: Arc<Inner>,
@@ -34,7 +33,7 @@ pub(crate) struct Inner {
 
 impl Oracle {
 	/// Creates a new timestamp oracle
-	pub fn new() -> Self {
+	pub fn new() -> Arc<Self> {
 		// Get the current unix time in nanoseconds
 		let reference_unix = Self::current_unix_ns();
 		// Get a new monotonically increasing clock
@@ -51,7 +50,7 @@ impl Oracle {
 		// Start up the resyncing thread
 		oracle.worker_resync();
 		// Return the oracle
-		oracle
+		Arc::new(oracle)
 	}
 
 	/// Returns the current timestamp for this oracle
