@@ -665,18 +665,7 @@ where
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
-						if tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= version)
-							// Check if there is a version prior to this transaction
-							.is_some_and(|v| {
-								// Check if the found entry is a deleted version
-								v.value.is_some()
-							}) {
+						if tv.exists_version(version) {
 							if skip > 0 {
 								skip -= 1;
 							} else {
@@ -712,18 +701,7 @@ where
 				// Only the left iterator has any items
 				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
-					if tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= version)
-						// Check if there is a version prior to this transaction
-						.is_some_and(|v| {
-							// Check if the found entry is a deleted version
-							v.value.is_some()
-						}) {
+					if tv.exists_version(version) {
 						if skip > 0 {
 							skip -= 1;
 						} else {
@@ -827,18 +805,7 @@ where
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
-						if tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= version)
-							// Check if there is a version prior to this transaction
-							.is_some_and(|v| {
-								// Check if the found entry is a deleted version
-								v.value.is_some()
-							}) {
+						if tv.exists_version(version) {
 							if skip > 0 {
 								skip -= 1;
 							} else {
@@ -874,18 +841,7 @@ where
 				// Only the left iterator has any items
 				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
-					if tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= version)
-						// Check if there is a version prior to this transaction
-						.is_some_and(|v| {
-							// Check if the found entry is a deleted version
-							v.value.is_some()
-						}) {
+					if tv.exists_version(version) {
 						if skip > 0 {
 							skip -= 1;
 						} else {
@@ -989,16 +945,7 @@ where
 				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
 					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
-						if let Some(v) = tv
-							// Iterate through the entry versions
-							.iter()
-							// Reverse iterate through the versions
-							.rev()
-							// Get the version prior to this transaction
-							.find(|v| v.version <= version)
-							// Clone the entry prior to this transaction
-							.and_then(|v| v.value.clone())
-						{
+						if let Some(v) = tv.fetch_version(version) {
 							if skip > 0 {
 								skip -= 1;
 							} else {
@@ -1034,16 +981,7 @@ where
 				// Only the left iterator has any items
 				(Some((tk, tv)), _) if tk <= end => {
 					// Add this entry if it is not a delete
-					if let Some(v) = tv
-						// Iterate through the entry versions
-						.iter()
-						// Reverse iterate through the versions
-						.rev()
-						// Get the version prior to this transaction
-						.find(|v| v.version <= version)
-						// Clone the entry prior to this transaction
-						.and_then(|v| v.value.clone())
-					{
+					if let Some(v) = tv.fetch_version(version) {
 						if skip > 0 {
 							skip -= 1;
 						} else {
@@ -1100,15 +1038,7 @@ where
 		// Check the key
 		self.database
 			.datastore
-			.lookup(key.borrow(), |v| {
-				v.iter()
-					// Reverse iterate through the versions
-					.rev()
-					// Get the version prior to this transaction
-					.find(|v| v.version <= version)
-					// Return just the entry value
-					.and_then(|v| v.value.clone())
-			})
+			.lookup(key.borrow(), |v| v.fetch_version(version))
 			// The result will be None if the
 			// key is not present in the tree
 			.flatten()
@@ -1136,18 +1066,7 @@ where
 		// Check the key
 		self.database
 			.datastore
-			.lookup(key.borrow(), |v| {
-				v.iter()
-					// Reverse iterate through the versions
-					.rev()
-					// Get the version prior to this transaction
-					.find(|v| v.version <= version)
-					// Check if there is a version prior to this transaction
-					.is_some_and(|v| {
-						// Check if the found entry is a deleted version
-						v.value.is_some()
-					})
-			})
+			.lookup(key.borrow(), |v| v.exists_version(version))
 			.is_some_and(|v| v)
 	}
 
@@ -1173,15 +1092,7 @@ where
 		chk == self
 			.database
 			.datastore
-			.lookup(key.borrow(), |v| {
-				v.iter()
-					// Reverse iterate through the versions
-					.rev()
-					// Get the version prior to this transaction
-					.find(|v| v.version <= version)
-					// Return just the entry value
-					.and_then(|v| v.value.clone())
-			})
+			.lookup(key.borrow(), |v| v.fetch_version(version))
 			// The first Option will be None
 			// if the key is not present in
 			// the tree at all.

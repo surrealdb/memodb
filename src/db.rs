@@ -220,9 +220,9 @@ where
 					// Iterate over the entire tree
 					while let Some((_, versions)) = iter.next() {
 						// Find the last version with `version < cleanup_ts`
-						if let Some(idx) = versions.iter().rposition(|v| v.version < cleanup_ts) {
+						if let Some(idx) = versions.find_index(cleanup_ts) {
 							// Check if the found version is a 'delete'
-							if versions[idx].value.is_none() {
+							if versions.is_delete(idx) {
 								// Remove all versions up to and including this version
 								versions.drain(..=idx);
 							} else if idx > 0 {
