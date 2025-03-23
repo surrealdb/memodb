@@ -14,8 +14,10 @@ where
 	V: Eq + Clone + Sync + Send + 'static,
 {
 	fn from(value: Version<V>) -> Self {
+		let mut inner = SmallVec::new();
+		inner.push(value);
 		Versions {
-			inner: SmallVec::from(vec![value]),
+			inner,
 		}
 	}
 }
