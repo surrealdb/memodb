@@ -1102,24 +1102,30 @@ where
 	/// Atomimcally inserts the transaction into the commit queue
 	#[inline(always)]
 	fn atomic_commit(&self, updates: Commit<K>) -> (u64, Arc<Commit<K>>) {
+		// Store the number of spins
+		let mut spins = 0;
 		// Get the commit attempt id
 		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
 		// Loop until the atomic operation is successful
 		loop {
-			// Clone the commit arc reference
-			let updates = Arc::clone(&updates);
 			// Get the database transaction merge queue
 			let queue = &self.database.transaction_commit_queue;
 			// Get the current commit queue number
 			let version = self.database.transaction_commit_id.load(Ordering::Acquire) + 1;
 			// Insert into the queue if the number is the same
-			let entry = queue.compare_insert(version, updates, |v| id == v.id);
+			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
 				self.database.transaction_commit_id.fetch_add(1, Ordering::AcqRel);
 				return (version, entry.value().clone());
+			}
+			// Increase the number loop spins we have attempted
+			spins += 1;
+			// Ensure the thread backs off when under contention
+			if spins > 10 {
+				std::thread::yield_now();
 			}
 		}
 	}
@@ -1127,6 +1133,8 @@ where
 	/// Atomimcally inserts the transaction into the merge queue
 	#[inline(always)]
 	fn atomic_merge(&self, updates: Merge<K, V>) -> (u64, Arc<Merge<K, V>>) {
+		// Store the number of spins
+		let mut spins = 0;
 		// Get the commit attempt id
 		let id = updates.id;
 		// Store the commit in an Arc
@@ -1137,8 +1145,6 @@ where
 		let mut version = oracle.current_time_ns();
 		// Loop until we reach the next incremental timestamp
 		loop {
-			// Clone the commit arc reference
-			let updates = Arc::clone(&updates);
 			// Get the database transaction merge queue
 			let queue = &self.database.transaction_merge_queue;
 			// Get the last timestamp for this oracle
@@ -1148,11 +1154,17 @@ where
 				version = last_ts + 1;
 			}
 			// Insert into the queue if the number is the same
-			let entry = queue.compare_insert(version, updates, |v| id == v.id);
+			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
 				oracle.inner.timestamp.store(version, Ordering::Release);
 				return (version, entry.value().clone());
+			}
+			// Increase the number loop spins we have attempted
+			spins += 1;
+			// Ensure the thread backs off when under contention
+			if spins > 10 {
+				std::thread::yield_now();
 			}
 		}
 	}
