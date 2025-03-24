@@ -112,7 +112,7 @@ where
 			// Return the value
 			(value, counter)
 		};
-		// Create the read only transaction
+		// Create the transaction
 		Transaction {
 			mode: IsolationLevel::SerializableSnapshotIsolation,
 			done: false,
