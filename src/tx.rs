@@ -176,17 +176,19 @@ where
 		if self.writeset.is_empty() {
 			return Ok(());
 		}
+		// Take ownership over the local modifications
+		let writeset = Arc::new(std::mem::take(&mut self.writeset));
 		// Insert this transaction into the commit queue
 		let (version, entry) = self.atomic_commit(Commit {
-			keyset: self.writeset.keys().cloned().collect(),
+			writeset: writeset.clone(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Retrieve all transactions committed since we began
 			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
-				// A previous transaction has conflicts against writes
-				if !tx.value().keyset.is_disjoint(&entry.keyset) {
+				// Check if a previous transaction conflicts against writes
+				if !tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
 					// Return the error for this transaction
@@ -194,15 +196,15 @@ where
 				}
 				// Check if we should check for conflicting read keys
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-					// A previous transaction has conflicts against reads
-					if !tx.value().keyset.is_disjoint(&self.readset) {
+					// Check if a previous transaction conflicts against reads
+					if !tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
 					// A previous transaction has conflicts against scans
-					for k in tx.value().keyset.iter() {
+					for k in tx.value().writeset.keys() {
 						// Check if this key may be within a scan range
 						if let Some(range) = self.scanset.range(..=k).next_back() {
 							// Check if the range includes this key
@@ -217,8 +219,6 @@ where
 				}
 			}
 		}
-		// Take ownership over the local modifications
-		let writeset = std::mem::take(&mut self.writeset);
 		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
@@ -1101,7 +1101,7 @@ where
 
 	/// Atomimcally inserts the transaction into the commit queue
 	#[inline(always)]
-	fn atomic_commit(&self, updates: Commit<K>) -> (u64, Arc<Commit<K>>) {
+	fn atomic_commit(&self, updates: Commit<K, V>) -> (u64, Arc<Commit<K, V>>) {
 		// Store the number of spins
 		let mut spins = 0;
 		// Get the commit attempt id

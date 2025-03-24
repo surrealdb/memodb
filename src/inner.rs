@@ -47,7 +47,7 @@ where
 	/// The transaction merge queue attempt sequence number
 	pub(crate) transaction_merge_id: AtomicU64,
 	/// The transaction commit queue list of modifications
-	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit<K>>>,
+	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit<K, V>>>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge<K, V>>>,
 	/// The epoch duration to determine how long to store versioned data
