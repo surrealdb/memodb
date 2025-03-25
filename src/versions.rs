@@ -1,5 +1,4 @@
 use crate::version::Version;
-use smallvec::Drain;
 use smallvec::SmallVec;
 
 pub struct Versions<V>
@@ -47,11 +46,14 @@ where
 
 	/// An iterator that removes the items and yields them by value.
 	#[inline]
-	pub fn drain<R>(&mut self, range: R) -> Drain<[Version<V>; 4]>
+	pub fn drain<R>(&mut self, range: R)
 	where
 		R: std::ops::RangeBounds<usize>,
 	{
-		self.inner.drain(range)
+		// Drain the versions
+		self.inner.drain(range);
+		// Shrink the vec inline
+		self.inner.shrink_to_fit();
 	}
 
 	/// Check if the item at a specific version is a delete.
