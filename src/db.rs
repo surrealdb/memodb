@@ -15,6 +15,8 @@
 //! This module stores the core in-memory database type.
 
 use crate::inner::Inner;
+use crate::pool::Pool;
+use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -28,15 +30,20 @@ const GC_INTERVAL: Duration = Duration::from_secs(60);
 /// The interval at which transaction queue cleanup is performed
 const CU_INTERVAL: Duration = Duration::from_millis(250);
 
+// --------------------------------------------------
+// Database
+// --------------------------------------------------
+
 /// A transactional in-memory database
-#[derive(Clone)]
 pub struct Database<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	// The inner strcuture of the database
+	/// The inner structure of the database
 	inner: Arc<Inner<K, V>>,
+	/// The database transaction pool
+	pool: Arc<Pool<K, V>>,
 }
 
 impl<K, V> Default for Database<K, V>
@@ -45,8 +52,14 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	fn default() -> Self {
+		//  Create a new inner database
+		let inner = Arc::new(Inner::default());
+		// Initialise a transaction pool
+		let pool = Pool::new(inner.clone(), DEFAULT_POOL_SIZE);
+		// Return the new database
 		Database {
-			inner: Arc::new(Inner::default()),
+			inner,
+			pool,
 		}
 	}
 }
@@ -124,7 +137,7 @@ where
 
 	/// Start a new transaction on this database
 	pub fn transaction(&self, write: bool) -> Transaction<K, V> {
-		Transaction::new(self.inner.clone(), write)
+		self.pool.get(write)
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit

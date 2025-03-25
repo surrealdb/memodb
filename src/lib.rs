@@ -19,6 +19,7 @@ mod direction;
 mod err;
 mod inner;
 mod oracle;
+mod pool;
 mod queue;
 mod tx;
 mod version;

@@ -17,6 +17,7 @@
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
+use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
@@ -24,8 +25,15 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Range;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// The maximum entry threshold for internal maps
+/// and sets within a transation, which when reached
+/// will lead to those maps and sets being reset and
+/// deallocated when resetting the transaction
+const THRESHOLD: usize = 100;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -34,34 +42,20 @@ pub enum IsolationLevel {
 	SerializableSnapshotIsolation,
 }
 
-/// A serializable snapshot isolated database transaction
+// --------------------------------------------------
+// Transaction
+// --------------------------------------------------
+
+/// A serializable database transaction
 pub struct Transaction<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	/// The isolation level of this transaction
-	mode: IsolationLevel,
-	/// Is the transaction complete?
-	done: bool,
-	/// Is the transaction writeable?
-	write: bool,
-	/// The version at which this transaction started
-	commit: u64,
-	/// The version at which this transaction started
-	version: u64,
-	/// The local set of key reads
-	readset: BTreeSet<K>,
-	/// The local set of key scans
-	scanset: BTreeMap<K, K>,
-	/// The local set of updates and deletes
-	writeset: BTreeMap<K, Option<V>>,
-	/// The parent database for this transaction
-	database: Arc<Inner<K, V>>,
-	/// The reference to the transaction commit counter
-	counter_commit: Arc<AtomicU64>,
-	/// The reference to the transaction version counter
-	counter_version: Arc<AtomicU64>,
+	/// The transaction pool for this transaction
+	pub(crate) pool: Arc<Pool<K, V>>,
+	/// The inner transaction for this transaction
+	pub(crate) inner: Option<TransactionInner<K, V>>,
 }
 
 impl<K, V> Drop for Transaction<K, V>
@@ -70,10 +64,36 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	fn drop(&mut self) {
-		// Reduce the transaction commit counter
-		self.counter_commit.fetch_sub(1, Ordering::Relaxed);
-		// Reduce the transaction version counter
-		self.counter_version.fetch_sub(1, Ordering::Relaxed);
+		if let Some(inner) = self.inner.take() {
+			// Reduce the transaction commit counter
+			inner.counter_commit.fetch_sub(1, Ordering::Relaxed);
+			// Reduce the transaction version counter
+			inner.counter_version.fetch_sub(1, Ordering::Relaxed);
+			// Put the transaction in to the pool
+			self.pool.put(inner);
+		}
+	}
+}
+
+impl<K, V> Deref for Transaction<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	type Target = TransactionInner<K, V>;
+
+	fn deref(&self) -> &Self::Target {
+		self.inner.as_ref().unwrap()
+	}
+}
+
+impl<K, V> DerefMut for Transaction<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.inner.as_mut().unwrap()
 	}
 }
 
@@ -82,8 +102,60 @@ where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
+	/// Ensure this transaction is committed with snapshot isolation guarantees
+	pub fn with_snapshot_isolation(mut self) -> Self {
+		self.mode = IsolationLevel::SnapshotIsolation;
+		self
+	}
+
+	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
+	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
+		self.mode = IsolationLevel::SerializableSnapshotIsolation;
+		self
+	}
+}
+
+// --------------------------------------------------
+// TransactionInner
+// --------------------------------------------------
+
+/// The inner structure of a database transaction
+pub struct TransactionInner<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	/// The isolation level of this transaction
+	pub(crate) mode: IsolationLevel,
+	/// Is the transaction complete?
+	pub(crate) done: bool,
+	/// Is the transaction writeable?
+	pub(crate) write: bool,
+	/// The version at which this transaction started
+	pub(crate) commit: u64,
+	/// The version at which this transaction started
+	pub(crate) version: u64,
+	/// The local set of key reads
+	pub(crate) readset: BTreeSet<K>,
+	/// The local set of key scans
+	pub(crate) scanset: BTreeMap<K, K>,
+	/// The local set of updates and deletes
+	pub(crate) writeset: BTreeMap<K, Option<V>>,
+	/// The parent database for this transaction
+	pub(crate) database: Arc<Inner<K, V>>,
+	/// The reference to the transaction commit counter
+	pub(crate) counter_commit: Arc<AtomicU64>,
+	/// The reference to the transaction version counter
+	pub(crate) counter_version: Arc<AtomicU64>,
+}
+
+impl<K, V> TransactionInner<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
 	/// Create a new read-only or writeable transaction
-	pub(crate) fn new(db: Arc<Inner<K, V>>, write: bool) -> Transaction<K, V> {
+	pub(crate) fn new(db: Arc<Inner<K, V>>, write: bool) -> Self {
 		// Prepare and increment the oracle counter
 		let (version, counter_version) = {
 			// Get the current version sequence number
@@ -113,7 +185,7 @@ where
 			(value, counter)
 		};
 		// Create the transaction
-		Transaction {
+		Self {
 			mode: IsolationLevel::SerializableSnapshotIsolation,
 			done: false,
 			write,
@@ -128,16 +200,67 @@ where
 		}
 	}
 
-	/// Ensure this transaction is committed with snapshot isolation guarantees
-	pub fn with_snapshot_isolation(mut self) -> Self {
-		self.mode = IsolationLevel::SnapshotIsolation;
-		self
-	}
-
-	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
-	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
+	/// Resets an allocated read-only or writeable transaction
+	pub(crate) fn reset(&mut self, write: bool) {
+		// Set the default transaction isolation level
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
-		self
+		// Prepare and increment the oracle counter
+		let (version, counter_version) = {
+			// Get the current version sequence number
+			let value = self.database.oracle.current_timestamp();
+			// Initialise the transaction oracle counter
+			let entry = self
+				.database
+				.counter_by_oracle
+				.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
+			// Fetch the underlying counter for this value
+			let counter = entry.value().clone();
+			// Increment the transaction oracle counter
+			counter.fetch_add(1, Ordering::Relaxed);
+			// Return the value
+			(value, counter)
+		};
+		// Prepare and increment the commit counter
+		let (commit, counter_commit) = {
+			// Get the current commit sequence number
+			let value = self.database.transaction_commit_id.load(Ordering::Relaxed);
+			// Initialise the transaction commit counter
+			let entry = self
+				.database
+				.counter_by_commit
+				.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
+			// Fetch the underlying counter for this value
+			let counter = entry.value().clone();
+			// Increment the transaction commit counter
+			counter.fetch_add(1, Ordering::Relaxed);
+			// Return the value
+			(value, counter)
+		};
+		// Clear or completely reset the allocated readset
+		match self.readset.len() > THRESHOLD {
+			true => self.readset = BTreeSet::new(),
+			false => self.readset.clear(),
+		};
+		// Clear or completely reset the allocated scanset
+		match self.scanset.len() > THRESHOLD {
+			true => self.scanset = BTreeMap::new(),
+			false => self.scanset.clear(),
+		};
+		// Clear or completely reset the allocated writeset
+		match self.writeset.len() > THRESHOLD {
+			true => self.writeset = BTreeMap::new(),
+			false => self.writeset.clear(),
+		};
+		// Reset the transaction
+		self.done = false;
+		self.write = write;
+		self.commit = commit;
+		self.version = version;
+		self.readset.clear();
+		self.scanset.clear();
+		self.writeset.clear();
+		self.counter_commit = counter_commit;
+		self.counter_version = counter_version;
 	}
 
 	/// Get the starting sequence number of this transaction
