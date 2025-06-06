@@ -17,7 +17,6 @@
 use crate::oracle::Oracle;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
-use bplustree::BPlusTree;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use std::fmt::Debug;
@@ -34,8 +33,8 @@ where
 {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free B+tree datastructure
-	pub(crate) datastore: BPlusTree<K, Versions<V>>,
+	/// The underlying lock-free Skip Map datastructure
+	pub(crate) datastore: SkipMap<K, RwLock<Versions<V>>>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -68,7 +67,7 @@ where
 	fn default() -> Self {
 		Inner {
 			oracle: Oracle::new(),
-			datastore: BPlusTree::new(),
+			datastore: SkipMap::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_queue_id: AtomicU64::new(0),

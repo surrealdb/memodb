@@ -226,12 +226,12 @@ where
 					let cleanup_ts = inuse.unwrap_or(now);
 					// Get the time before which entries should be removed
 					let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
-					// Get a mutable iterator over the tree
-					let mut iter = db.datastore.raw_iter_mut();
-					// Start at the beginning of the tree
-					iter.seek_to_first();
 					// Iterate over the entire tree
-					while let Some((_, versions)) = iter.next() {
+					for entry in db.datastore.iter() {
+						// Fetch the entry value
+						let versions = entry.value();
+						// Modify the version entries
+						let mut versions = versions.write();
 						// Find the last version with `version < cleanup_ts`
 						if let Some(idx) = versions.find_index(cleanup_ts) {
 							// Check if the found version is a 'delete'
