@@ -21,6 +21,7 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+use parking_lot::RwLock;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -347,27 +348,23 @@ where
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Get a mutable iterator over the tree
-		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Check if this key already exists
-			if iter.seek_exact(key) {
-				// We know it exists, so we can unwrap
-				iter.next().unwrap().1.push(Version {
+			if let Some(entry) = self.database.datastore.get(key) {
+				entry.value().write().push(Version {
 					version,
 					value,
 				});
 			} else {
-				// Otherwise insert a new entry into the tree
-				iter.insert(
+				self.database.datastore.insert(
 					key.clone(),
-					Versions::from(Version {
+					RwLock::new(Versions::from(Version {
 						version,
 						value,
-					}),
+					})),
 				);
 			}
 		}
@@ -768,24 +765,22 @@ where
 				};
 			}
 		}
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
+		// Get iterators
+		let mut tree_iter = self.database.datastore.range(beg..=end);
 		let mut self_iter = self.writeset.range(beg..end);
-		// Seek to the start of the scan range
-		match direction {
-			Direction::Forward => tree_iter.seek(beg),
-			Direction::Reverse => tree_iter.seek_for_prev(end),
-		};
 		// Get the first items manually
 		let (mut tree_next, mut self_next) = match direction {
 			Direction::Forward => (tree_iter.next(), self_iter.next()),
-			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+			Direction::Reverse => (tree_iter.next_back(), self_iter.next_back()),
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res < l) {
-			match (tree_next, self_next) {
+			match (tree_next.clone(), self_next.clone()) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
+					let tk = t_entry.key();
+					let tv_lock = t_entry.value();
+					let tv = tv_lock.read();
 					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if tv.exists_version(version) {
@@ -797,14 +792,14 @@ where
 						}
 						tree_next = match direction {
 							Direction::Forward => tree_iter.next(),
-							Direction::Reverse => tree_iter.prev(),
+							Direction::Reverse => tree_iter.next_back(),
 						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
 							tree_next = match direction {
 								Direction::Forward => tree_iter.next(),
-								Direction::Reverse => tree_iter.prev(),
+								Direction::Reverse => tree_iter.next_back(),
 							};
 						}
 						// Add this entry if it is not a delete
@@ -822,7 +817,9 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
+				(Some(t_entry), _) if t_entry.key() <= end => {
+					let tv_lock = t_entry.value();
+					let tv = tv_lock.read();
 					// Add this entry if it is not a delete
 					if tv.exists_version(version) {
 						if skip > 0 {
@@ -833,7 +830,7 @@ where
 					}
 					tree_next = match direction {
 						Direction::Forward => tree_iter.next(),
-						Direction::Reverse => tree_iter.prev(),
+						Direction::Reverse => tree_iter.next_back(),
 					};
 				}
 				// Only the right iterator has any items
@@ -908,24 +905,22 @@ where
 				};
 			}
 		}
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
+		// Get iterators
+		let mut tree_iter = self.database.datastore.range(beg..=end);
 		let mut self_iter = self.writeset.range(beg..end);
-		// Seek to the start of the scan range
-		match direction {
-			Direction::Forward => tree_iter.seek(beg),
-			Direction::Reverse => tree_iter.seek_for_prev(end),
-		};
 		// Get the first items manually
 		let (mut tree_next, mut self_next) = match direction {
 			Direction::Forward => (tree_iter.next(), self_iter.next()),
-			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+			Direction::Reverse => (tree_iter.next_back(), self_iter.next_back()),
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next, self_next) {
+			match (tree_next.clone(), self_next.clone()) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
+					let tk = t_entry.key();
+					let tv_lock = t_entry.value();
+					let tv = tv_lock.read();
 					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if tv.exists_version(version) {
@@ -937,14 +932,14 @@ where
 						}
 						tree_next = match direction {
 							Direction::Forward => tree_iter.next(),
-							Direction::Reverse => tree_iter.prev(),
+							Direction::Reverse => tree_iter.next_back(),
 						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
 							tree_next = match direction {
 								Direction::Forward => tree_iter.next(),
-								Direction::Reverse => tree_iter.prev(),
+								Direction::Reverse => tree_iter.next_back(),
 							};
 						}
 						// Add this entry if it is not a delete
@@ -962,7 +957,10 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
+				(Some(t_entry), _) if t_entry.key() <= end => {
+					let tk = t_entry.key();
+					let tv_lock = t_entry.value();
+					let tv = tv_lock.read();
 					// Add this entry if it is not a delete
 					if tv.exists_version(version) {
 						if skip > 0 {
@@ -973,7 +971,7 @@ where
 					}
 					tree_next = match direction {
 						Direction::Forward => tree_iter.next(),
-						Direction::Reverse => tree_iter.prev(),
+						Direction::Reverse => tree_iter.next_back(),
 					};
 				}
 				// Only the right iterator has any items
@@ -1048,24 +1046,22 @@ where
 				};
 			}
 		}
-		// Get raw iterators
-		let mut tree_iter = self.database.datastore.raw_iter();
+		// Get iterators
+		let mut tree_iter = self.database.datastore.range(beg..=end);
 		let mut self_iter = self.writeset.range(beg..end);
-		// Seek to the start of the scan range
-		match direction {
-			Direction::Forward => tree_iter.seek(beg),
-			Direction::Reverse => tree_iter.seek_for_prev(end),
-		};
 		// Get the first items manually
 		let (mut tree_next, mut self_next) = match direction {
 			Direction::Forward => (tree_iter.next(), self_iter.next()),
-			Direction::Reverse => (tree_iter.prev(), self_iter.next_back()),
+			Direction::Reverse => (tree_iter.next_back(), self_iter.next_back()),
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next, self_next) {
+			match (tree_next.clone(), self_next.clone()) {
 				// Both iterators have items, we need to compare
-				(Some((tk, tv)), Some((sk, sv))) if tk <= end && sk <= end => {
+				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
+					let tk = t_entry.key();
+					let tv_lock = t_entry.value();
+					let tv = tv_lock.read();
 					if tk <= sk && tk != sk {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv.fetch_version(version) {
@@ -1077,14 +1073,14 @@ where
 						}
 						tree_next = match direction {
 							Direction::Forward => tree_iter.next(),
-							Direction::Reverse => tree_iter.prev(),
+							Direction::Reverse => tree_iter.next_back(),
 						};
 					} else {
 						// Advance the tree if the keys match
 						if tk == sk {
 							tree_next = match direction {
 								Direction::Forward => tree_iter.next(),
-								Direction::Reverse => tree_iter.prev(),
+								Direction::Reverse => tree_iter.next_back(),
 							};
 						}
 						// Add this entry if it is not a delete
@@ -1102,7 +1098,10 @@ where
 					}
 				}
 				// Only the left iterator has any items
-				(Some((tk, tv)), _) if tk <= end => {
+				(Some(t_entry), _) if t_entry.key() <= end => {
+					let tk = t_entry.key();
+					let tv_lock = t_entry.value();
+					let tv = tv_lock.read();
 					// Add this entry if it is not a delete
 					if let Some(v) = tv.fetch_version(version) {
 						if skip > 0 {
@@ -1113,7 +1112,7 @@ where
 					}
 					tree_next = match direction {
 						Direction::Forward => tree_iter.next(),
-						Direction::Reverse => tree_iter.prev(),
+						Direction::Reverse => tree_iter.next_back(),
 					};
 				}
 				// Only the right iterator has any items
@@ -1161,10 +1160,8 @@ where
 		// Check the key
 		self.database
 			.datastore
-			.lookup(key.borrow(), |v| v.fetch_version(version))
-			// The result will be None if the
-			// key is not present in the tree
-			.flatten()
+			.get(key.borrow())
+			.and_then(|e| e.value().read().fetch_version(version))
 	}
 
 	/// Check if a key exists in the datastore only
@@ -1189,7 +1186,8 @@ where
 		// Check the key
 		self.database
 			.datastore
-			.lookup(key.borrow(), |v| v.exists_version(version))
+			.get(key.borrow())
+			.map(|e| e.value().read().exists_version(version))
 			.is_some_and(|v| v)
 	}
 
@@ -1215,11 +1213,8 @@ where
 		chk == self
 			.database
 			.datastore
-			.lookup(key.borrow(), |v| v.fetch_version(version))
-			// The first Option will be None
-			// if the key is not present in
-			// the tree at all.
-			.flatten()
+			.get(key.borrow())
+			.and_then(|e| e.value().read().fetch_version(version))
 	}
 
 	/// Atomimcally inserts the transaction into the commit queue
