@@ -18,6 +18,7 @@ mod db;
 mod direction;
 mod err;
 mod inner;
+mod options;
 mod oracle;
 mod pool;
 mod queue;
@@ -32,5 +33,7 @@ pub(crate) mod kv;
 pub use self::db::*;
 #[doc(inline)]
 pub use self::err::*;
+#[doc(inline)]
+pub use self::options::*;
 #[doc(inline)]
 pub use self::tx::*;
