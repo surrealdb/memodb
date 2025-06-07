@@ -775,7 +775,7 @@ where
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res < l) {
-			match (tree_next.clone(), self_next.clone()) {
+			match (tree_next.clone(), self_next) {
 				// Both iterators have items, we need to compare
 				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
 					let tk = t_entry.key();
@@ -915,7 +915,7 @@ where
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next.clone(), self_next.clone()) {
+			match (tree_next.clone(), self_next) {
 				// Both iterators have items, we need to compare
 				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
 					let tk = t_entry.key();
@@ -1056,7 +1056,7 @@ where
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next.clone(), self_next.clone()) {
+			match (tree_next.clone(), self_next) {
 				// Both iterators have items, we need to compare
 				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
 					let tk = t_entry.key();
