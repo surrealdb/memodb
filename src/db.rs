@@ -106,9 +106,13 @@ where
 			gc_interval: opts.gc_interval,
 			cleanup_interval: opts.cleanup_interval,
 		};
-		// Start background tasks
-		db.initialise_cleanup_worker();
-		db.initialise_garbage_worker();
+		// Start background tasks when enabled
+		if opts.enable_cleanup {
+			db.initialise_cleanup_worker();
+		}
+		if opts.enable_gc {
+			db.initialise_garbage_worker();
+		}
 		// Return the database
 		db
 	}
@@ -150,6 +154,77 @@ where
 	/// Start a new transaction on this database
 	pub fn transaction(&self, write: bool) -> Transaction<K, V> {
 		self.pool.get(write)
+	}
+
+	/// Manually perform transaction queue cleanup.
+	///
+	/// This should be called when automatic cleanup is disabled via
+	/// [`DatabaseOptions::enable_cleanup`].
+	pub fn run_cleanup(&self) {
+		{
+			// Get the current version sequence number
+			let value = self.oracle.current_timestamp();
+			// Iterate over transaction version counters
+			self.counter_by_oracle.range(..value).for_each(|e| {
+				if e.value().load(Ordering::Relaxed) == 0 {
+					e.remove();
+				}
+			});
+		}
+		{
+			// Get the current commit sequence number
+			let value = self.transaction_commit_id.load(Ordering::Relaxed);
+			// Iterate over transaction commit counters
+			self.counter_by_commit.range(..value).for_each(|e| {
+				if e.value().load(Ordering::Relaxed) == 0 {
+					e.remove();
+				}
+			});
+			// Get the oldest commit entry which is still active
+			if let Some(entry) = self.counter_by_commit.front() {
+				// Get the oldest commit version
+				let oldest = entry.key();
+				// Remove commits up to this commit queue id from the transaction queue
+				self.transaction_commit_queue.range(..oldest).for_each(|e| {
+					e.remove();
+				});
+			}
+		}
+	}
+
+	/// Manually perform garbage collection of stale record versions.
+	///
+	/// This should be called when automatic garbage collection is disabled via
+	/// [`DatabaseOptions::enable_gc`].
+	pub fn run_gc(&self) {
+		// Get the current timestamp version
+		let now = self.oracle.current_timestamp();
+		// Get the earliest used timestamp version
+		let inuse = self.counter_by_oracle.front().map(|e| *e.key());
+		// Get the garbage collection epoch as nanoseconds
+		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+		// Fetch the earliest of the inuse or current time
+		let cleanup_ts = inuse.unwrap_or(now);
+		// Get the time before which entries should be removed
+		let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
+		// Iterate over the entire tree
+		for entry in self.datastore.iter() {
+			// Fetch the entry value
+			let versions = entry.value();
+			// Modify the version entries
+			let mut versions = versions.write();
+			// Find the last version with `version < cleanup_ts`
+			if let Some(idx) = versions.find_index(cleanup_ts) {
+				// Check if the found version is a 'delete'
+				if versions.is_delete(idx) {
+					// Remove all versions up to and including this version
+					versions.drain(..=idx);
+				} else if idx > 0 {
+					// Remove all versions up to this version
+					versions.drain(..idx);
+				};
+			}
+		}
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit

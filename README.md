@@ -54,3 +54,35 @@ fn main() {
     tx.cancel().unwrap();
 }
 ```
+
+#### Manual cleanup and garbage collection
+
+Background worker threads perform cleanup and garbage collection at regular
+intervals. These workers can be disabled through `DatabaseOptions` by setting
+`enable_cleanup` or `enable_gc` to `false`. When disabled, the tasks can be
+triggered manually using the `run_cleanup` and `run_gc` methods.
+
+```rust
+use memodb::{Database, DatabaseOptions};
+
+fn main() {
+    // Create a database with custom settings
+    let opts = DatabaseOptions { enable_gc: false, enable_cleanup: false, ..Default::default() };
+    let db: Database<&str, &str> = Database::new_with_options(opts);
+
+    // Start a write transaction
+    let mut tx = db.transaction(true);
+    tx.put("key", "value1").unwrap();
+    tx.commit().unwrap();
+
+	// Start a write transaction
+    let mut tx = db.transaction(true);
+    tx.put("key", "value2").unwrap();
+    tx.commit().unwrap();
+
+    // Manually remove old queue entries
+    db.run_gc();
+    // Manually remove unused transaction stale versions
+    db.run_cleanup();
+}
+```
