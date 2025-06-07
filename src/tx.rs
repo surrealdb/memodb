@@ -30,12 +30,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// The maximum entry threshold for internal maps
-/// and sets within a transation, which when reached
-/// will lead to those maps and sets being reset and
-/// deallocated when resetting the transaction
-const THRESHOLD: usize = 100;
-
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
 pub enum IsolationLevel {
@@ -148,6 +142,8 @@ where
 	pub(crate) counter_commit: Arc<AtomicU64>,
 	/// The reference to the transaction version counter
 	pub(crate) counter_version: Arc<AtomicU64>,
+	/// Threshold after which transaction state is reset
+	reset_threshold: usize,
 }
 
 impl<K, V> TransactionInner<K, V>
@@ -185,6 +181,8 @@ where
 			// Return the value
 			(value, counter)
 		};
+		// Store the threshold separately before moving db
+		let threshold = db.reset_threshold;
 		// Create the transaction
 		Self {
 			mode: IsolationLevel::SerializableSnapshotIsolation,
@@ -198,6 +196,7 @@ where
 			database: db,
 			counter_commit,
 			counter_version,
+			reset_threshold: threshold,
 		}
 	}
 
@@ -205,6 +204,8 @@ where
 	pub(crate) fn reset(&mut self, write: bool) {
 		// Set the default transaction isolation level
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
+		// Update the reset threshold from the database
+		self.reset_threshold = self.database.reset_threshold;
 		// Prepare and increment the oracle counter
 		let (version, counter_version) = {
 			// Get the current version sequence number
@@ -238,17 +239,18 @@ where
 			(value, counter)
 		};
 		// Clear or completely reset the allocated readset
-		match self.readset.len() > THRESHOLD {
+		let threshold = self.reset_threshold;
+		match self.readset.len() > threshold {
 			true => self.readset = BTreeSet::new(),
 			false => self.readset.clear(),
 		};
 		// Clear or completely reset the allocated scanset
-		match self.scanset.len() > THRESHOLD {
+		match self.scanset.len() > threshold {
 			true => self.scanset = BTreeMap::new(),
 			false => self.scanset.clear(),
 		};
 		// Clear or completely reset the allocated writeset
-		match self.writeset.len() > THRESHOLD {
+		match self.writeset.len() > threshold {
 			true => self.writeset = BTreeMap::new(),
 			false => self.writeset.clear(),
 		};

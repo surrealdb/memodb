@@ -14,6 +14,7 @@
 
 //! This module stores the inner in-memory database type.
 
+use crate::options::DEFAULT_RESET_THRESHOLD;
 use crate::oracle::Oracle;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
@@ -58,6 +59,8 @@ where
 	pub(crate) transaction_cleanup_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Stores a handle to the current garbage collection background thread
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
+	/// Threshold after which transaction state is reset
+	pub(crate) reset_threshold: usize,
 }
 
 impl<K, V> Inner<K, V>
@@ -81,6 +84,7 @@ where
 			background_threads_enabled: AtomicBool::new(true),
 			transaction_cleanup_handle: RwLock::new(None),
 			garbage_collection_handle: RwLock::new(None),
+			reset_threshold: DEFAULT_RESET_THRESHOLD,
 		}
 	}
 }

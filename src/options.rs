@@ -1,6 +1,9 @@
 use crate::pool::DEFAULT_POOL_SIZE;
 use std::time::Duration;
 
+/// Default threshold at which transaction state is fully reset.
+pub const DEFAULT_RESET_THRESHOLD: usize = 100;
+
 /// Default interval at which garbage collection is performed.
 pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -23,6 +26,8 @@ pub struct DatabaseOptions {
 	pub enable_cleanup: bool,
 	/// Interval at which the cleanup worker wakes up.
 	pub cleanup_interval: Duration,
+	/// Threshold after which transaction state maps are reset.
+	pub reset_threshold: usize,
 	/// Interval at which the timestamp oracle resyncs with the system clock.
 	pub resync_interval: Duration,
 }
@@ -35,6 +40,7 @@ impl Default for DatabaseOptions {
 			gc_interval: DEFAULT_GC_INTERVAL,
 			enable_cleanup: true,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
+			reset_threshold: DEFAULT_RESET_THRESHOLD,
 			resync_interval: DEFAULT_RESYNC_INTERVAL,
 		}
 	}
