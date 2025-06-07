@@ -96,7 +96,7 @@ where
 	/// Create a new transactional in-memory database with custom options
 	pub fn new_with_options(opts: DatabaseOptions) -> Self {
 		//  Create a new inner database
-		let inner = Arc::new(Inner::default());
+		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
 		let pool = Pool::new(inner.clone(), opts.pool_size);
 		// Create the database

@@ -17,6 +17,7 @@
 use crate::oracle::Oracle;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
+use crate::DatabaseOptions;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use std::fmt::Debug;
@@ -59,14 +60,15 @@ where
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 }
 
-impl<K, V> Default for Inner<K, V>
+impl<K, V> Inner<K, V>
 where
 	K: Ord + Clone + Debug + Sync + Send + 'static,
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
-	fn default() -> Self {
-		Inner {
-			oracle: Oracle::new(),
+	/// Create a new [`Inner`] structure with the given oracle resync interval.
+	pub fn new(opts: &DatabaseOptions) -> Self {
+		Self {
+			oracle: Oracle::new(opts.resync_interval),
 			datastore: SkipMap::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
@@ -80,5 +82,15 @@ where
 			transaction_cleanup_handle: RwLock::new(None),
 			garbage_collection_handle: RwLock::new(None),
 		}
+	}
+}
+
+impl<K, V> Default for Inner<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	fn default() -> Self {
+		Self::new(&DatabaseOptions::default())
 	}
 }
