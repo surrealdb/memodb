@@ -7,6 +7,9 @@ pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval at which transaction queue cleanup is performed.
 pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Default interval at which the timestamp oracle resyncs with the system clock.
+pub const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Configuration options for [`Database`].
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {
@@ -20,6 +23,8 @@ pub struct DatabaseOptions {
 	pub enable_cleanup: bool,
 	/// Interval at which the cleanup worker wakes up.
 	pub cleanup_interval: Duration,
+	/// Interval at which the timestamp oracle resyncs with the system clock.
+	pub resync_interval: Duration,
 }
 
 impl Default for DatabaseOptions {
@@ -30,6 +35,7 @@ impl Default for DatabaseOptions {
 			gc_interval: DEFAULT_GC_INTERVAL,
 			enable_cleanup: true,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
+			resync_interval: DEFAULT_RESYNC_INTERVAL,
 		}
 	}
 }

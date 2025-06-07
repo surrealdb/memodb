@@ -5,8 +5,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const RESYNC_INTERVAL: Duration = Duration::from_secs(5);
-
 /// A timestamp oracle for monotonically increasing time
 pub(crate) struct Oracle {
 	// The inner strcuture of an Oracle
@@ -29,11 +27,13 @@ pub(crate) struct Inner {
 	pub(crate) resync_enabled: AtomicBool,
 	/// Stores a handle to the current timestamp syncing background thread
 	pub(crate) resync_handle: Mutex<Option<JoinHandle<()>>>,
+	/// Interval at which the oracle resyncs with the system clock
+	pub(crate) resync_interval: Duration,
 }
 
 impl Oracle {
-	/// Creates a new timestamp oracle
-	pub fn new() -> Arc<Self> {
+	/// Creates a new timestamp oracle with the specified resync interval
+	pub fn new(resync_interval: Duration) -> Arc<Self> {
 		// Get the current unix time in nanoseconds
 		let reference_unix = Self::current_unix_ns();
 		// Get a new monotonically increasing clock
@@ -45,6 +45,7 @@ impl Oracle {
 				reference: ArcSwap::new(Arc::new((reference_unix, reference_time))),
 				resync_enabled: AtomicBool::new(true),
 				resync_handle: Mutex::new(None),
+				resync_interval,
 			}),
 		};
 		// Start up the resyncing thread
@@ -89,12 +90,14 @@ impl Oracle {
 	fn worker_resync(&self) {
 		// Clone the underlying oracle inner
 		let oracle = self.inner.clone();
+		// Store the resync interval for the thread
+		let interval = oracle.resync_interval;
 		// Spawn a new thread to handle timestamp resyncing
 		let handle = std::thread::spawn(move || {
 			// Check whether the timestamp resync process is enabled
 			while oracle.resync_enabled.load(Ordering::Acquire) {
 				// Wait for a specified time interval
-				std::thread::park_timeout(RESYNC_INTERVAL);
+				std::thread::park_timeout(interval);
 				// Get the current unix time in nanoseconds
 				let reference_unix = Self::current_unix_ns();
 				// Get a new monotonically increasing clock
