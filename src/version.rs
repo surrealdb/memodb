@@ -33,6 +33,7 @@ impl<V> Ord for Version<V>
 where
 	V: Eq + Clone + Sync + Send + 'static,
 {
+	#[inline]
 	fn cmp(&self, other: &Self) -> Ordering {
 		self.version.cmp(&other.version)
 	}
@@ -42,6 +43,7 @@ impl<V> PartialOrd for Version<V>
 where
 	V: Eq + Clone + Sync + Send + 'static,
 {
+	#[inline]
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
 		Some(self.version.cmp(&other.version))
 	}

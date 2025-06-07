@@ -55,11 +55,13 @@ impl Oracle {
 	}
 
 	/// Returns the current timestamp for this oracle
+	#[inline]
 	pub fn current_timestamp(&self) -> u64 {
 		self.inner.timestamp.load(Ordering::Acquire)
 	}
 
 	/// Gets the current system time in nanoseconds since the Unix epoch
+	#[inline]
 	pub(crate) fn current_unix_ns() -> u64 {
 		// Get the current system time
 		let timestamp = SystemTime::now().duration_since(UNIX_EPOCH);
@@ -68,6 +70,7 @@ impl Oracle {
 	}
 
 	/// Gets the current estimated time in nanoseconds since the Unix epoch
+	#[inline]
 	pub(crate) fn current_time_ns(&self) -> u64 {
 		// Get the current reference time
 		let reference = self.inner.reference.load();
