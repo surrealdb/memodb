@@ -26,12 +26,14 @@ where
 	V: Eq + Clone + Sync + Send + 'static,
 {
 	/// Insert a value into its sorted position
+	#[inline]
 	pub(crate) fn insert(&mut self, value: Version<V>) {
 		let pos = self.inner.binary_search(&value).unwrap_or_else(|e| e);
 		self.inner.insert(pos, value);
 	}
 
 	/// Appends an element to the back of a collection.
+	#[inline]
 	pub(crate) fn push(&mut self, value: Version<V>) {
 		if let Some(last) = self.inner.last() {
 			if value >= *last {
@@ -57,16 +59,19 @@ where
 	}
 
 	/// Check if the item at a specific version is a delete.
+	#[inline]
 	pub(crate) fn is_delete(&self, version: usize) -> bool {
 		self.inner.get(version).is_some_and(|v| v.value.is_none())
 	}
 
 	/// Get the index for a specific version in the versions list.
+	#[inline]
 	pub(crate) fn find_index(&self, version: u64) -> Option<usize> {
 		self.inner.iter().rposition(|v| v.version < version)
 	}
 
 	/// Fetch the entry at a specific version in the versions list.
+	#[inline]
 	pub(crate) fn fetch_version(&self, version: u64) -> Option<V> {
 		self.inner
 			.iter()
@@ -79,6 +84,7 @@ where
 	}
 
 	/// Check if an entry at a specific version exists and is not a delete.
+	#[inline]
 	pub(crate) fn exists_version(&self, version: u64) -> bool {
 		self.inner
 			.iter()
