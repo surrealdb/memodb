@@ -174,6 +174,7 @@ where
 		let db = self.inner.clone();
 		// Check if a background thread is already running
 		if db.transaction_cleanup_handle.read().is_none() {
+			// Get the specified interval
 			let interval = self.cleanup_interval;
 			// Spawn a new thread to handle periodic cleanup
 			let handle = std::thread::spawn(move || {
@@ -223,6 +224,7 @@ where
 		let db = self.inner.clone();
 		// Check if a background thread is already running
 		if db.garbage_collection_handle.read().is_none() {
+			// Get the specified interval
 			let interval = self.gc_interval;
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
