@@ -15,6 +15,7 @@
 //! This module stores the core in-memory database type.
 
 use crate::inner::Inner;
+use crate::options::{DatabaseOptions, DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
@@ -23,12 +24,6 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// The interval at which garbage collection is performed
-const GC_INTERVAL: Duration = Duration::from_secs(60);
-
-/// The interval at which transaction queue cleanup is performed
-const CU_INTERVAL: Duration = Duration::from_millis(250);
 
 // --------------------------------------------------
 // Database
@@ -44,6 +39,10 @@ where
 	inner: Arc<Inner<K, V>>,
 	/// The database transaction pool
 	pool: Arc<Pool<K, V>>,
+	/// Interval used by the garbage collector thread
+	gc_interval: Duration,
+	/// Interval used by the cleanup thread
+	cleanup_interval: Duration,
 }
 
 impl<K, V> Default for Database<K, V>
@@ -52,14 +51,13 @@ where
 	V: Eq + Clone + Debug + Sync + Send + 'static,
 {
 	fn default() -> Self {
-		//  Create a new inner database
 		let inner = Arc::new(Inner::default());
-		// Initialise a transaction pool
 		let pool = Pool::new(inner.clone(), DEFAULT_POOL_SIZE);
-		// Return the new database
 		Database {
 			inner,
 			pool,
+			gc_interval: DEFAULT_GC_INTERVAL,
+			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 		}
 	}
 }
@@ -92,8 +90,22 @@ where
 {
 	/// Create a new transactional in-memory database
 	pub fn new() -> Self {
+		Self::new_with_options(DatabaseOptions::default())
+	}
+
+	/// Create a new transactional in-memory database with custom options
+	pub fn new_with_options(opts: DatabaseOptions) -> Self {
+		//  Create a new inner database
+		let inner = Arc::new(Inner::default());
+		// Initialise a transaction pool
+		let pool = Pool::new(inner.clone(), opts.pool_size);
 		// Create the database
-		let db = Database::default();
+		let db = Database {
+			inner,
+			pool,
+			gc_interval: opts.gc_interval,
+			cleanup_interval: opts.cleanup_interval,
+		};
 		// Start background tasks
 		db.initialise_cleanup_worker();
 		db.initialise_garbage_worker();
@@ -162,12 +174,14 @@ where
 		let db = self.inner.clone();
 		// Check if a background thread is already running
 		if db.transaction_cleanup_handle.read().is_none() {
-			// Spawn a new thread to handle periodic garbage collection
+			// Get the specified interval
+			let interval = self.cleanup_interval;
+			// Spawn a new thread to handle periodic cleanup
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::SeqCst) {
 					// Wait for a specified time interval
-					std::thread::park_timeout(CU_INTERVAL);
+					std::thread::park_timeout(interval);
 					{
 						// Get the current version sequence number
 						let value = db.oracle.current_timestamp();
@@ -210,12 +224,14 @@ where
 		let db = self.inner.clone();
 		// Check if a background thread is already running
 		if db.garbage_collection_handle.read().is_none() {
+			// Get the specified interval
+			let interval = self.gc_interval;
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::SeqCst) {
 					// Wait for a specified time interval
-					std::thread::park_timeout(GC_INTERVAL);
+					std::thread::park_timeout(interval);
 					// Get the current timestamp version
 					let now = db.oracle.current_timestamp();
 					// Get the earliest used timestamp version

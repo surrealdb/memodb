@@ -32,3 +32,25 @@
 - Multiple concurrent writers without locking
 - Support for serializable, snapshot isolated transactions
 - Atomicity, Consistency and Isolation from ACID
+
+#### Quick start
+
+```rust
+use memodb::{Database, DatabaseOptions};
+
+fn main() {
+    // Create a database with custom settings
+    let opts = DatabaseOptions { pool_size: 128, ..Default::default() };
+    let db: Database<&str, &str> = Database::new_with_options(opts);
+
+    // Start a write transaction
+    let mut tx = db.transaction(true);
+    tx.put("key", "value").unwrap();
+    tx.commit().unwrap();
+
+    // Read the value back
+    let mut tx = db.transaction(false);
+    assert_eq!(tx.get("key").unwrap(), Some("value"));
+    tx.cancel().unwrap();
+}
+```
