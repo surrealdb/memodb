@@ -1927,8 +1927,8 @@ mod tests {
 		assert!(txn1.get(key1).is_ok());
 		assert!(txn2.get(key2).is_ok());
 
-		txn1.set(key1, &value3).unwrap();
-		txn2.set(key2, &value4).unwrap();
+		txn1.set(key1, value3).unwrap();
+		txn2.set(key2, value4).unwrap();
 
 		assert_eq!(txn1.get(key2).unwrap().unwrap(), value2);
 		assert_eq!(txn2.get(key1).unwrap().unwrap(), value1);
@@ -1951,7 +1951,7 @@ mod tests {
 		let mut txn2 = db.transaction(true);
 
 		assert!(txn1.get(key1).is_ok());
-		txn1.set(key1, &value3).unwrap();
+		txn1.set(key1, value3).unwrap();
 
 		let range = "k1".."k2";
 		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
@@ -1994,8 +1994,8 @@ mod tests {
 		assert_eq!(res[0].1, value1);
 		assert_eq!(res[1].1, value2);
 
-		txn1.set(key1, &value3).unwrap();
-		txn2.set(key2, &value4).unwrap();
+		txn1.set(key1, value3).unwrap();
+		txn2.set(key2, value4).unwrap();
 
 		txn1.commit().unwrap();
 
@@ -2023,8 +2023,8 @@ mod tests {
 			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 			txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 
-			txn1.set(key3, &value3).unwrap();
-			txn2.set(key4, &value4).unwrap();
+			txn1.set(key3, value3).unwrap();
+			txn2.set(key4, value4).unwrap();
 
 			txn1.commit().unwrap();
 
@@ -2041,8 +2041,8 @@ mod tests {
 			txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 			txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 
-			txn1.set(key4, &value3).unwrap();
-			txn2.set(key5, &value4).unwrap();
+			txn1.set(key4, value3).unwrap();
+			txn2.set(key5, value4).unwrap();
 
 			txn1.commit().unwrap();
 			txn2.commit().unwrap();
@@ -2059,8 +2059,8 @@ mod tests {
 			let range = "k3".."k7";
 			txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 
-			txn1.set(key6, &value3).unwrap();
-			txn2.set(key7, &value4).unwrap();
+			txn1.set(key6, value3).unwrap();
+			txn2.set(key7, value4).unwrap();
 
 			txn1.commit().unwrap();
 			assert!(txn2.commit().is_err());
