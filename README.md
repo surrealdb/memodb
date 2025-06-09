@@ -80,9 +80,10 @@ fn main() {
     tx.put("key", "value2").unwrap();
     tx.commit().unwrap();
 
+	// Manually remove unused transaction stale versions
+    db.run_cleanup();
+	
     // Manually remove old queue entries
     db.run_gc();
-    // Manually remove unused transaction stale versions
-    db.run_cleanup();
 }
 ```
