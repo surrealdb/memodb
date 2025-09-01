@@ -16,6 +16,7 @@
 
 use crate::options::DEFAULT_RESET_THRESHOLD;
 use crate::oracle::Oracle;
+use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
 use crate::DatabaseOptions;
@@ -56,6 +57,8 @@ where
 	pub(crate) transaction_merge_injector: Injector<u64>,
 	/// The epoch duration to determine how long to store versioned data
 	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
+	/// Optional persistence handler
+	pub(crate) persistence: RwLock<Option<Arc<Persistence<K, V>>>>,
 	/// Specifies whether background worker threads are enabled
 	pub(crate) background_threads_enabled: AtomicBool,
 	/// Stores a handle to the current transaction cleanup background thread
@@ -87,6 +90,7 @@ where
 			transaction_merge_queue: SkipMap::new(),
 			transaction_merge_injector: Injector::new(),
 			garbage_collection_epoch: RwLock::new(None),
+			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
 			transaction_cleanup_handle: RwLock::new(None),
 			garbage_collection_handle: RwLock::new(None),

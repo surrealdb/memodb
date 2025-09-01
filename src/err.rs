@@ -14,29 +14,78 @@
 
 //! This module stores the database error types.
 
+use bincode::error::DecodeError as BincodeDecodeError;
+use bincode::error::EncodeError as BincodeEncodeError;
+use std::io::Error as IoError;
+use std::sync::PoisonError;
 use thiserror::Error;
 
 /// The errors which can be emitted from a database.
 #[derive(Error, Debug)]
 pub enum Error {
+	/// A transaction is closed.
 	#[error("Transaction is closed")]
 	TxClosed,
 
+	/// A transaction is not writable.
 	#[error("Transaction is not writable")]
 	TxNotWritable,
 
+	/// A key being inserted already exists.
 	#[error("Key being inserted already exists")]
 	KeyAlreadyExists,
 
+	/// A value being checked was not correct.
 	#[error("Value being checked was not correct")]
 	ValNotExpectedValue,
 
+	/// A read conflict, retry the transaction.
 	#[error("Read conflict, retry the transaction")]
 	KeyReadConflict,
 
+	/// A write conflict, retry the transaction.
 	#[error("Write conflict, retry the transaction")]
 	KeyWriteConflict,
 
+	/// Can not fetch value at a future version.
 	#[error("Can not fetch value at a future version")]
 	VersionInFuture,
+
+	/// A transaction is not persistent.
+	#[error("Transaction is not persistent")]
+	TxCommitNotPersisted(PersistenceError),
+}
+
+/// The errors that can occur during persistence operations.
+#[derive(Error, Debug)]
+pub enum PersistenceError {
+	/// An IO error occurred.
+	#[error("IO error: {0}")]
+	Io(#[from] IoError),
+
+	/// A serialization error occurred.
+	#[error("Serialization error: {0}")]
+	Serialization(#[from] BincodeEncodeError),
+
+	/// A deserialization error occurred.
+	#[error("Deserialization error: {0}")]
+	Deserialization(#[from] BincodeDecodeError),
+
+	/// A lock acquisition failed.
+	#[error("Lock acquisition failed")]
+	LockFailed(String),
+
+	/// A snapshot creation failed.
+	#[error("Snapshot creation failed: {0}")]
+	SnapshotFailed(String),
+
+	/// An AOL append failed.
+	#[error("AOL append failed: {0}")]
+	AppendFailed(String),
+}
+
+impl<T> From<PoisonError<std::sync::MutexGuard<'_, T>>> for PersistenceError {
+	fn from(error: PoisonError<std::sync::MutexGuard<'_, T>>) -> Self {
+		PersistenceError::LockFailed(error.to_string())
+	}
 }

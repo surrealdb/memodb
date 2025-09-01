@@ -26,6 +26,14 @@ impl<V> Versions<V>
 where
 	V: Eq + Clone + Sync + Send + 'static,
 {
+	/// Create a new versions object.
+	#[inline]
+	pub(crate) fn new() -> Self {
+		Versions {
+			inner: SmallVec::new(),
+		}
+	}
+
 	/// Insert a value into its sorted position
 	#[inline]
 	pub(crate) fn insert(&mut self, value: Version<V>) {
@@ -102,5 +110,11 @@ where
 		} else {
 			false
 		}
+	}
+
+	/// Get all versions as a vector of (version, value) tuples.
+	#[inline]
+	pub(crate) fn all_versions(&self) -> Vec<(u64, Option<Arc<V>>)> {
+		self.inner.iter().map(|v| (v.version, v.value.clone())).collect()
 	}
 }

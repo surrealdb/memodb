@@ -32,6 +32,11 @@
 - Multiple concurrent writers without locking
 - Support for serializable, snapshot isolated transactions
 - Atomicity, Consistency and Isolation from ACID
+- Optional persistence with configurable modes:
+  - Support for synchronous and asynchronous append-only logging
+  - Support for periodic full-datastore snapshots
+  - Support for fsync on every commit, or periodically in the background
+  - SUpport for LZ4 snapshot file compression
 
 #### Quick start
 
@@ -83,7 +88,111 @@ fn main() {
 	// Manually remove unused transaction stale versions
     db.run_cleanup();
 	
-    // Manually remove old queue entries
+	// Manually remove old queue entries
     db.run_gc();
 }
 ```
+
+#### Persistence modes
+
+MemoDB supports optional persistence with two modes:
+
+##### Full persistence (AOL + Snapshots) - Default
+
+Provides maximum durability by logging every change to an append-only log and taking periodic snapshots.
+
+```rust
+use memodb::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./data")
+        .with_aol_mode(AolMode::SynchronousOnCommit)
+        .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(60)));
+    
+    let db: Database<String, String> = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key".to_string(), "value".to_string())?;
+    tx.commit()?; // Changes immediately written to AOL
+    
+    Ok(())
+}
+```
+
+##### Snapshot-only persistence
+
+Provides good performance with periodic durability by taking snapshots without logging individual changes.
+
+```rust
+use memodb::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./snapshot_data")
+        .with_aol_mode(AolMode::Never) // Disable AOL, use only snapshots
+        .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(30)));
+    
+    let db: Database<String, String> = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key".to_string(), "value".to_string())?;
+    tx.commit()?; // Changes only persisted during snapshots
+    
+    Ok(())
+}
+```
+
+##### Configuration Options
+
+###### AOL Modes
+- **`AolMode::Never`**: Disables append-only logging entirely (default)
+- **`AolMode::SynchronousOnCommit`**: Writes changes to AOL immediately on every commit (maximum durability)
+- **`AolMode::AsynchronousAfterCommit`**: Writes changes to AOL asynchronously after every commit (better performance)
+
+###### Snapshot Modes
+- **`SnapshotMode::Never`**: Disables snapshots entirely (default)
+- **`SnapshotMode::Interval(Duration)`**: Takes snapshots at the specified interval
+
+###### Fsync Modes
+- **`FsyncMode::Never`**: Never calls fsync - fastest but least durable (default)
+- **`FsyncMode::EveryAppend`**: Calls fsync after every AOL append - slowest but most durable
+- **`FsyncMode::Interval(Duration)`**: Calls fsync at most once per interval - balanced approach
+
+###### Compression Support
+- **`CompressionMode::None`**: No compression applied to snapshots (default)
+- **`CompressionMode::Lz4`**: Fast LZ4 compression for snapshots (reduces storage size)
+
+##### Advanced Configuration Example
+
+```rust
+use memodb::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode, FsyncMode, CompressionMode};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./advanced_data")
+        .with_aol_mode(AolMode::AsynchronousAfterCommit)          // Async AOL writes
+        .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(300))) // Snapshot every 5 minutes
+        .with_fsync_mode(FsyncMode::Interval(Duration::from_secs(1)))         // Fsync every second
+        .with_compression(CompressionMode::Lz4);                              // Enable LZ4 compression
+    
+    let db: Database<String, String> = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key".to_string(), "value".to_string())?;
+    tx.commit()?; // Changes written asynchronously to AOL, fsync'd every second
+    
+    Ok(())
+}
+```
+
+**Trade-offs:**
+- **AOL + Snapshots**: Maximum durability, slower writes, larger storage
+- **Snapshot-only**: Better performance, risk of data loss between snapshots, smaller storage
+- **Synchronous AOL**: Immediate durability, slower commit times
+- **Asynchronous AOL**: Better performance, small risk of data loss on system crash
+- **Frequent fsync**: Higher durability, reduced performance
+- **LZ4 Compression**: Smaller storage footprint, slight CPU overhead

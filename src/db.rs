@@ -16,6 +16,7 @@
 
 use crate::inner::Inner;
 use crate::options::{DatabaseOptions, DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
+use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
@@ -23,6 +24,7 @@ use crate::version::Version;
 use crate::versions::Versions;
 use crossbeam_deque::Steal;
 use parking_lot::RwLock;
+use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
@@ -43,6 +45,8 @@ where
 	inner: Arc<Inner<K, V>>,
 	/// The database transaction pool
 	pool: Arc<Pool<K, V>>,
+	/// Optional persistence configuration
+	persistence: Option<Persistence<K, V>>,
 	/// Interval used by the garbage collector thread
 	gc_interval: Duration,
 	/// Interval used by the cleanup thread
@@ -60,6 +64,7 @@ where
 		Database {
 			inner,
 			pool,
+			persistence: None,
 			gc_interval: DEFAULT_GC_INTERVAL,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 		}
@@ -107,6 +112,7 @@ where
 		let db = Database {
 			inner,
 			pool,
+			persistence: None,
 			gc_interval: opts.gc_interval,
 			cleanup_interval: opts.cleanup_interval,
 		};
@@ -122,6 +128,46 @@ where
 		}
 		// Return the database
 		db
+	}
+
+	/// Create a new persistent database with custom options and persistence settings
+	pub fn new_with_persistence(
+		opts: DatabaseOptions,
+		persistence_opts: crate::PersistenceOptions,
+	) -> std::io::Result<Self>
+	where
+		K: Serialize + DeserializeOwned,
+		V: Serialize + DeserializeOwned,
+	{
+		//  Create a new inner database
+		let inner = Arc::new(Inner::new(&opts));
+		// Initialise a transaction pool
+		let pool = Pool::new(inner.clone(), opts.pool_size);
+		// Create a new persistence layer with options
+		let persist = Persistence::new_with_options(persistence_opts, inner.clone())
+			.map_err(std::io::Error::other)?;
+		// Replace the persistence layer in the database
+		inner.persistence.write().replace(Arc::new(persist.clone()));
+		// Create the database
+		let db = Database {
+			inner,
+			pool,
+			persistence: Some(persist),
+			gc_interval: opts.gc_interval,
+			cleanup_interval: opts.cleanup_interval,
+		};
+		// Start background tasks when enabled
+		if opts.enable_cleanup {
+			db.initialise_cleanup_worker();
+		}
+		if opts.enable_gc {
+			db.initialise_garbage_worker();
+		}
+		if opts.enable_merge_worker {
+			db.initialise_persistence_worker();
+		}
+		// Return the database
+		Ok(db)
 	}
 
 	/// Configure the database to use inactive garbage collection.
@@ -161,6 +207,11 @@ where
 	/// Start a new transaction on this database
 	pub fn transaction(&self, write: bool) -> Transaction<K, V> {
 		self.pool.get(write)
+	}
+
+	/// Get a reference to the persistence layer if enabled
+	pub fn persistence(&self) -> Option<&Persistence<K, V>> {
+		self.persistence.as_ref()
 	}
 
 	/// Manually perform transaction queue cleanup.
@@ -241,17 +292,17 @@ where
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
 			handle.thread().unpark();
-			handle.join().unwrap();
+			let _ = handle.join();
 		}
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.garbage_collection_handle.write().take() {
 			handle.thread().unpark();
-			handle.join().unwrap();
+			let _ = handle.join();
 		}
 		// Wait for the merge worker thread to exit
 		if let Some(handle) = self.transaction_merge_handle.write().take() {
 			handle.thread().unpark();
-			handle.join().unwrap();
+			let _ = handle.join();
 		}
 	}
 
@@ -269,6 +320,11 @@ where
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
+					// Check shutdown flag again after waking
+					if !db.background_threads_enabled.load(Ordering::Relaxed) {
+						break;
+					}
+					// Clean up the transaction version counters
 					{
 						// Get the current version sequence number
 						let value = db.oracle.current_timestamp();
@@ -279,6 +335,7 @@ where
 							}
 						});
 					}
+					// Clean up the transaction commit counters
 					{
 						// Get the current commit sequence number
 						let value = db.transaction_commit_id.load(Ordering::Relaxed);
@@ -319,6 +376,10 @@ where
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
+					// Check shutdown flag again after waking
+					if !db.background_threads_enabled.load(Ordering::Relaxed) {
+						break;
+					}
 					// Get the current timestamp version
 					let now = db.oracle.current_timestamp();
 					// Get the earliest used timestamp version
@@ -390,6 +451,76 @@ where
 												value,
 											})),
 										);
+									}
+								}
+								// Remove this transaction from the merge queue
+								db.transaction_merge_queue.remove(&version);
+							}
+							// Process more immediately if available
+							std::thread::yield_now();
+						}
+						// No work available, park until unparked
+						Steal::Empty => {
+							std::thread::park();
+						}
+						// Another thread is stealing so yield
+						Steal::Retry => {
+							std::thread::yield_now();
+						}
+					}
+				}
+			});
+			// Store and track the thread handle
+			*self.inner.transaction_merge_handle.write() = Some(handle);
+		}
+	}
+
+	/// Start the persistence worker thread after creating the database
+	fn initialise_persistence_worker(&self)
+	where
+		K: Serialize,
+		V: Serialize,
+	{
+		// Clone the underlying datastore inner
+		let db = self.inner.clone();
+		// Check if a background thread is already running
+		if db.transaction_merge_handle.read().is_none() {
+			// Spawn a new thread to handle continuous merging
+			let handle = std::thread::spawn(move || {
+				// Check whether the merge worker process is enabled
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
+					// Try to steal a version from the injector
+					match db.transaction_merge_injector.steal() {
+						// A version was stolen so process it
+						Steal::Success(version) => {
+							// Get the merge entry from the queue
+							if let Some(entry) = db.transaction_merge_queue.get(&version) {
+								// Fetch the merge entry
+								let entry = entry.value();
+								// Loop over the updates in the writeset
+								for (key, value) in entry.writeset.iter() {
+									// Clone the value for insertion
+									let value = value.clone();
+									// Check if this key already exists
+									if let Some(entry) = db.datastore.get(key) {
+										entry.value().write().push(Version {
+											version,
+											value,
+										});
+									} else {
+										db.datastore.insert(
+											key.clone(),
+											RwLock::new(Versions::from(Version {
+												version,
+												value,
+											})),
+										);
+									}
+								}
+								// Append the transaction to the persistence layer
+								if let Some(p) = db.persistence.read().clone() {
+									if let Err(e) = p.append(version, entry.writeset.as_ref()) {
+										tracing::error!("Failed to write to AOL file: {e}");
 									}
 								}
 								// Remove this transaction from the merge queue
