@@ -15,6 +15,7 @@
 //! This module stores a MVCC versioned entry.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Version<V>
@@ -26,7 +27,7 @@ where
 	/// The value of this entry. If this is
 	/// None, then the key is deleted and if
 	/// it is Some then the key exists.
-	pub(crate) value: Option<V>,
+	pub(crate) value: Option<Arc<V>>,
 }
 
 impl<V> Ord for Version<V>

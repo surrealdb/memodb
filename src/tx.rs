@@ -135,7 +135,7 @@ where
 	/// The local set of key scans
 	pub(crate) scanset: BTreeMap<K, K>,
 	/// The local set of updates and deletes
-	pub(crate) writeset: BTreeMap<K, Option<V>>,
+	pub(crate) writeset: BTreeMap<K, Option<Arc<V>>>,
 	/// The parent database for this transaction
 	pub(crate) database: Arc<Inner<K, V>>,
 	/// The reference to the transaction commit counter
@@ -443,7 +443,7 @@ where
 			// This is a writeable transaction
 			true => match self.writeset.get(key.borrow()) {
 				// The key exists in the writeset
-				Some(v) => v.clone(),
+				Some(v) => v.as_ref().map(|arc| arc.as_ref().clone()),
 				// Check for the key in the tree
 				None => {
 					// Fetch for the key from the datastore
@@ -496,7 +496,7 @@ where
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		self.writeset.insert(key.into(), Some(val));
+		self.writeset.insert(key.into(), Some(Arc::new(val)));
 		// Return result
 		Ok(())
 	}
@@ -516,7 +516,7 @@ where
 		}
 		// Set the key
 		match self.exists_in_datastore(key.borrow(), self.version) {
-			false => self.writeset.insert(key.into(), Some(val)),
+			false => self.writeset.insert(key.into(), Some(Arc::new(val))),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
 		// Return result
@@ -538,7 +538,7 @@ where
 		}
 		// Set the key
 		match self.equals_in_datastore(key.borrow(), chk, self.version) {
-			true => self.writeset.insert(key.into(), Some(val)),
+			true => self.writeset.insert(key.into(), Some(Arc::new(val))),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -1070,7 +1070,7 @@ where
 							if skip > 0 {
 								skip -= 1;
 							} else {
-								res.push((tk.clone(), v));
+								res.push((tk.clone(), v.as_ref().clone()));
 							}
 						}
 						tree_next = match direction {
@@ -1086,7 +1086,7 @@ where
 							};
 						}
 						// Add this entry if it is not a delete
-						if let Some(v) = sv.clone() {
+						if let Some(v) = sv.as_ref().map(|arc| arc.as_ref().clone()) {
 							if skip > 0 {
 								skip -= 1;
 							} else {
@@ -1109,7 +1109,7 @@ where
 						if skip > 0 {
 							skip -= 1;
 						} else {
-							res.push((tk.clone(), v));
+							res.push((tk.clone(), v.as_ref().clone()));
 						}
 					}
 					tree_next = match direction {
@@ -1120,7 +1120,7 @@ where
 				// Only the right iterator has any items
 				(_, Some((sk, sv))) if sk <= end => {
 					// Add this entry if it is not a delete
-					if let Some(v) = sv.clone() {
+					if let Some(v) = sv.as_ref().map(|arc| arc.as_ref().clone()) {
 						if skip > 0 {
 							skip -= 1;
 						} else {
@@ -1155,7 +1155,7 @@ where
 				// Check if the entry has a key
 				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return the entry value
-					return v.clone();
+					return v.as_ref().map(|arc| arc.as_ref().clone());
 				}
 			}
 		}
@@ -1164,6 +1164,7 @@ where
 			.datastore
 			.get(key.borrow())
 			.and_then(|e| e.value().read().fetch_version(version))
+			.map(|arc| arc.as_ref().clone())
 	}
 
 	/// Check if a key exists in the datastore only
@@ -1207,16 +1208,27 @@ where
 				// Check if the entry has a key
 				if let Some(v) = entry.value().writeset.get(key.borrow()) {
 					// Return whether the entry matches
-					return v == &chk;
+					return match (chk.as_ref(), v.as_ref()) {
+						(Some(x), Some(y)) => x == y.as_ref(),
+						(None, None) => true,
+						_ => false,
+					};
 				}
 			}
 		}
 		// Check the key
-		chk == self
-			.database
-			.datastore
-			.get(key.borrow())
-			.and_then(|e| e.value().read().fetch_version(version))
+		match (
+			chk.as_ref(),
+			self.database
+				.datastore
+				.get(key.borrow())
+				.and_then(|e| e.value().read().fetch_version(version))
+				.as_ref(),
+		) {
+			(Some(x), Some(y)) => x == y.as_ref(),
+			(None, None) => true,
+			_ => false,
+		}
 	}
 
 	/// Atomimcally inserts the transaction into the commit queue

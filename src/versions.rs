@@ -1,5 +1,6 @@
 use crate::version::Version;
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 pub struct Versions<V>
 where
@@ -79,7 +80,7 @@ where
 
 	/// Fetch the entry at a specific version in the versions list.
 	#[inline]
-	pub(crate) fn fetch_version(&self, version: u64) -> Option<V> {
+	pub(crate) fn fetch_version(&self, version: u64) -> Option<Arc<V>> {
 		// Use partition_point to find the first element where v.version > version
 		let idx = self.inner.partition_point(|v| v.version <= version);
 		// We want the last element where v.version <= version

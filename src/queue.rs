@@ -11,7 +11,7 @@ where
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
 	/// The local set of updates and deletes
-	pub(crate) writeset: Arc<BTreeMap<K, Option<V>>>,
+	pub(crate) writeset: Arc<BTreeMap<K, Option<Arc<V>>>>,
 }
 
 /// A transaction entry in the transaction merge queue
@@ -23,7 +23,7 @@ where
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
 	/// The local set of updates and deletes
-	pub(crate) writeset: Arc<BTreeMap<K, Option<V>>>,
+	pub(crate) writeset: Arc<BTreeMap<K, Option<Arc<V>>>>,
 }
 
 impl<K, V> Commit<K, V>
