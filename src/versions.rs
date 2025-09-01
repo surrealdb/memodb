@@ -67,35 +67,39 @@ where
 	/// Get the index for a specific version in the versions list.
 	#[inline]
 	pub(crate) fn find_index(&self, version: u64) -> Option<usize> {
-		self.inner.iter().rposition(|v| v.version < version)
+		// Use partition_point to find the first element where v.version >= version
+		let idx = self.inner.partition_point(|v| v.version < version);
+		// We want the last element where v.version < version
+		if idx > 0 {
+			Some(idx - 1)
+		} else {
+			None
+		}
 	}
 
 	/// Fetch the entry at a specific version in the versions list.
 	#[inline]
 	pub(crate) fn fetch_version(&self, version: u64) -> Option<V> {
-		self.inner
-			.iter()
-			// Reverse iterate through the versions
-			.rev()
-			// Get the version prior to this transaction
-			.find(|v| v.version <= version)
-			// Return just the entry value
-			.and_then(|v| v.value.clone())
+		// Use partition_point to find the first element where v.version > version
+		let idx = self.inner.partition_point(|v| v.version <= version);
+		// We want the last element where v.version <= version
+		if idx > 0 {
+			self.inner.get(idx - 1).and_then(|v| v.value.clone())
+		} else {
+			None
+		}
 	}
 
 	/// Check if an entry at a specific version exists and is not a delete.
 	#[inline]
 	pub(crate) fn exists_version(&self, version: u64) -> bool {
-		self.inner
-			.iter()
-			// Reverse iterate through the versions
-			.rev()
-			// Get the version prior to this transaction
-			.find(|v| v.version <= version)
-			// Check if there is a version prior to this transaction
-			.is_some_and(|v| {
-				// Check if the found entry is a deleted version
-				v.value.is_some()
-			})
+		// Use partition_point to find the first element where v.version > version
+		let idx = self.inner.partition_point(|v| v.version <= version);
+		// We want the last element where v.version <= version
+		if idx > 0 {
+			self.inner.get(idx - 1).is_some_and(|v| v.value.is_some())
+		} else {
+			false
+		}
 	}
 }
