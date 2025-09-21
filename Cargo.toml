@@ -28,3 +28,8 @@ thiserror = "1.0.58"
 
 [dev-dependencies]
 rand = "0.9.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "operations"
+harness = false
