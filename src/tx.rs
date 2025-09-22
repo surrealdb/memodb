@@ -776,23 +776,43 @@ where
 				};
 			}
 		}
+		// Combine writeset and merge queue entries
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		// Add the current transaction's writeset
+		for (k, v) in self.writeset.range(beg..end) {
+			combined_writeset.insert(k.clone(), v.clone());
+		}
+		// Add the merge queue entries in reverse order
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					// Only insert if not already present
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
 		// Get iterators
-		let mut tree_iter = self.database.datastore.range(beg..=end);
-		let mut self_iter = self.writeset.range(beg..end);
+		let mut tree_iter = self.database.datastore.range(beg..end);
+		let mut join_iter = combined_writeset.range(beg..end);
 		// Get the first items manually
-		let (mut tree_next, mut self_next) = match direction {
-			Direction::Forward => (tree_iter.next(), self_iter.next()),
-			Direction::Reverse => (tree_iter.next_back(), self_iter.next_back()),
+		let (mut tree_next, mut join_next) = match direction {
+			Direction::Forward => (tree_iter.next(), join_iter.next()),
+			Direction::Reverse => (tree_iter.next_back(), join_iter.next_back()),
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res < l) {
-			match (tree_next.clone(), self_next) {
+			match (tree_next.clone(), join_next) {
 				// Both iterators have items, we need to compare
-				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
+				(Some(t_entry), Some((jk, jv))) => {
 					let tk = t_entry.key();
 					let tv_lock = t_entry.value();
 					let tv = tv_lock.read();
-					if tk <= sk && tk != sk {
+					// Determine which key to process based on direction
+					let tree_first = match direction {
+						Direction::Forward => tk < jk,
+						Direction::Reverse => tk > jk,
+					};
+					if tree_first {
 						// Add this entry if it is not a delete
 						if tv.exists_version(version) {
 							if skip > 0 {
@@ -807,28 +827,28 @@ where
 						};
 					} else {
 						// Advance the tree if the keys match
-						if tk == sk {
+						if tk == jk {
 							tree_next = match direction {
 								Direction::Forward => tree_iter.next(),
 								Direction::Reverse => tree_iter.next_back(),
 							};
 						}
 						// Add this entry if it is not a delete
-						if sv.is_some() {
+						if jv.is_some() {
 							if skip > 0 {
 								skip -= 1;
 							} else {
 								res += 1;
 							}
 						}
-						self_next = match direction {
-							Direction::Forward => self_iter.next(),
-							Direction::Reverse => self_iter.next_back(),
+						join_next = match direction {
+							Direction::Forward => join_iter.next(),
+							Direction::Reverse => join_iter.next_back(),
 						};
 					}
 				}
 				// Only the left iterator has any items
-				(Some(t_entry), _) if t_entry.key() <= end => {
+				(Some(t_entry), _) => {
 					let tv_lock = t_entry.value();
 					let tv = tv_lock.read();
 					// Add this entry if it is not a delete
@@ -845,18 +865,18 @@ where
 					};
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
+				(_, Some((_, jv))) => {
 					// Add this entry if it is not a delete
-					if sv.is_some() {
+					if jv.is_some() {
 						if skip > 0 {
 							skip -= 1;
 						} else {
 							res += 1;
 						}
 					}
-					self_next = match direction {
-						Direction::Forward => self_iter.next(),
-						Direction::Reverse => self_iter.next_back(),
+					join_next = match direction {
+						Direction::Forward => join_iter.next(),
+						Direction::Reverse => join_iter.next_back(),
 					};
 				}
 				// Both iterators are exhausted
@@ -916,23 +936,43 @@ where
 				};
 			}
 		}
+		// Combine writeset and merge queue entries
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		// Add the current transaction's writeset
+		for (k, v) in self.writeset.range(beg..end) {
+			combined_writeset.insert(k.clone(), v.clone());
+		}
+		// Add the merge queue entries in reverse order
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					// Only insert if not already present
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
 		// Get iterators
-		let mut tree_iter = self.database.datastore.range(beg..=end);
-		let mut self_iter = self.writeset.range(beg..end);
+		let mut tree_iter = self.database.datastore.range(beg..end);
+		let mut join_iter = combined_writeset.range(beg..end);
 		// Get the first items manually
-		let (mut tree_next, mut self_next) = match direction {
-			Direction::Forward => (tree_iter.next(), self_iter.next()),
-			Direction::Reverse => (tree_iter.next_back(), self_iter.next_back()),
+		let (mut tree_next, mut join_next) = match direction {
+			Direction::Forward => (tree_iter.next(), join_iter.next()),
+			Direction::Reverse => (tree_iter.next_back(), join_iter.next_back()),
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next.clone(), self_next) {
+			match (tree_next.clone(), join_next) {
 				// Both iterators have items, we need to compare
-				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
+				(Some(t_entry), Some((jk, jv))) => {
 					let tk = t_entry.key();
 					let tv_lock = t_entry.value();
 					let tv = tv_lock.read();
-					if tk <= sk && tk != sk {
+					// Determine which key to process based on direction
+					let tree_first = match direction {
+						Direction::Forward => tk < jk,
+						Direction::Reverse => tk > jk,
+					};
+					if tree_first {
 						// Add this entry if it is not a delete
 						if tv.exists_version(version) {
 							if skip > 0 {
@@ -947,28 +987,28 @@ where
 						};
 					} else {
 						// Advance the tree if the keys match
-						if tk == sk {
+						if tk == jk {
 							tree_next = match direction {
 								Direction::Forward => tree_iter.next(),
 								Direction::Reverse => tree_iter.next_back(),
 							};
 						}
 						// Add this entry if it is not a delete
-						if sv.is_some() {
+						if jv.is_some() {
 							if skip > 0 {
 								skip -= 1;
 							} else {
-								res.push(sk.clone());
+								res.push(jk.clone());
 							}
 						}
-						self_next = match direction {
-							Direction::Forward => self_iter.next(),
-							Direction::Reverse => self_iter.next_back(),
+						join_next = match direction {
+							Direction::Forward => join_iter.next(),
+							Direction::Reverse => join_iter.next_back(),
 						};
 					}
 				}
 				// Only the left iterator has any items
-				(Some(t_entry), _) if t_entry.key() <= end => {
+				(Some(t_entry), _) => {
 					let tk = t_entry.key();
 					let tv_lock = t_entry.value();
 					let tv = tv_lock.read();
@@ -986,18 +1026,18 @@ where
 					};
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
+				(_, Some((jk, jv))) => {
 					// Add this entry if it is not a delete
-					if sv.is_some() {
+					if jv.is_some() {
 						if skip > 0 {
 							skip -= 1;
 						} else {
-							res.push(sk.clone());
+							res.push(jk.clone());
 						}
 					}
-					self_next = match direction {
-						Direction::Forward => self_iter.next(),
-						Direction::Reverse => self_iter.next_back(),
+					join_next = match direction {
+						Direction::Forward => join_iter.next(),
+						Direction::Reverse => join_iter.next_back(),
 					};
 				}
 				// Both iterators are exhausted
@@ -1057,23 +1097,43 @@ where
 				};
 			}
 		}
+		// Combine writeset and merge queue entries
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		// Add the current transaction's writeset
+		for (k, v) in self.writeset.range(beg..end) {
+			combined_writeset.insert(k.clone(), v.clone());
+		}
+		// Add the merge queue entries in reverse order
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					// Only insert if not already present
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
 		// Get iterators
-		let mut tree_iter = self.database.datastore.range(beg..=end);
-		let mut self_iter = self.writeset.range(beg..end);
+		let mut tree_iter = self.database.datastore.range(beg..end);
+		let mut join_iter = combined_writeset.range(beg..end);
 		// Get the first items manually
-		let (mut tree_next, mut self_next) = match direction {
-			Direction::Forward => (tree_iter.next(), self_iter.next()),
-			Direction::Reverse => (tree_iter.next_back(), self_iter.next_back()),
+		let (mut tree_next, mut join_next) = match direction {
+			Direction::Forward => (tree_iter.next(), join_iter.next()),
+			Direction::Reverse => (tree_iter.next_back(), join_iter.next_back()),
 		};
 		// Merge results until limit is reached
 		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next.clone(), self_next) {
+			match (tree_next.clone(), join_next) {
 				// Both iterators have items, we need to compare
-				(Some(t_entry), Some((sk, sv))) if t_entry.key() <= end && sk <= end => {
+				(Some(t_entry), Some((jk, jv))) => {
 					let tk = t_entry.key();
 					let tv_lock = t_entry.value();
 					let tv = tv_lock.read();
-					if tk <= sk && tk != sk {
+					// Determine which key to process based on direction
+					let tree_first = match direction {
+						Direction::Forward => tk < jk,
+						Direction::Reverse => tk > jk,
+					};
+					if tree_first {
 						// Add this entry if it is not a delete
 						if let Some(v) = tv.fetch_version(version) {
 							if skip > 0 {
@@ -1088,28 +1148,28 @@ where
 						};
 					} else {
 						// Advance the tree if the keys match
-						if tk == sk {
+						if tk == jk {
 							tree_next = match direction {
 								Direction::Forward => tree_iter.next(),
 								Direction::Reverse => tree_iter.next_back(),
 							};
 						}
 						// Add this entry if it is not a delete
-						if let Some(v) = sv.as_ref().map(|arc| arc.as_ref().clone()) {
+						if let Some(v) = jv.as_ref().map(|arc| arc.as_ref().clone()) {
 							if skip > 0 {
 								skip -= 1;
 							} else {
-								res.push((sk.clone(), v));
+								res.push((jk.clone(), v));
 							}
 						}
-						self_next = match direction {
-							Direction::Forward => self_iter.next(),
-							Direction::Reverse => self_iter.next_back(),
+						join_next = match direction {
+							Direction::Forward => join_iter.next(),
+							Direction::Reverse => join_iter.next_back(),
 						};
 					}
 				}
 				// Only the left iterator has any items
-				(Some(t_entry), _) if t_entry.key() <= end => {
+				(Some(t_entry), _) => {
 					let tk = t_entry.key();
 					let tv_lock = t_entry.value();
 					let tv = tv_lock.read();
@@ -1127,18 +1187,18 @@ where
 					};
 				}
 				// Only the right iterator has any items
-				(_, Some((sk, sv))) if sk <= end => {
+				(_, Some((jk, jv))) => {
 					// Add this entry if it is not a delete
-					if let Some(v) = sv.as_ref().map(|arc| arc.as_ref().clone()) {
+					if let Some(v) = jv.as_ref().map(|arc| arc.as_ref().clone()) {
 						if skip > 0 {
 							skip -= 1;
 						} else {
-							res.push((sk.clone(), v));
+							res.push((jk.clone(), v));
 						}
 					}
-					self_next = match direction {
-						Direction::Forward => self_iter.next(),
-						Direction::Reverse => self_iter.next_back(),
+					join_next = match direction {
+						Direction::Forward => join_iter.next(),
+						Direction::Reverse => join_iter.next_back(),
 					};
 				}
 				// Both iterators are exhausted
