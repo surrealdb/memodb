@@ -1884,7 +1884,7 @@ mod tests {
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
 
-		let range = "k1".."k2";
+		let range = "k1".."k3";
 		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
@@ -1916,7 +1916,7 @@ mod tests {
 		let mut txn2 = db.transaction(true);
 
 		assert_eq!(txn1.get(key1).unwrap().unwrap(), value1);
-		let range = "k1".."k2";
+		let range = "k1".."k3";
 		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
@@ -1976,7 +1976,7 @@ mod tests {
 		assert!(txn1.get(key1).is_ok());
 		txn1.set(key1, value3).unwrap();
 
-		let range = "k1".."k2";
+		let range = "k1".."k3";
 		let res = txn2.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
@@ -2006,7 +2006,7 @@ mod tests {
 		let mut txn1 = db.transaction(true);
 		let mut txn2 = db.transaction(true);
 
-		let range = "k1".."k2";
+		let range = "k1".."k3";
 		let res = txn1.scan(range.clone(), None, None).expect("Scan should succeed");
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].1, value1);
