@@ -350,28 +350,37 @@ where
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Loop over the updates in the writeset
-		for (key, value) in entry.writeset.iter() {
-			// Clone the value for insertion
-			let value = value.clone();
-			// Check if this key already exists
-			if let Some(entry) = self.database.datastore.get(key) {
-				entry.value().write().push(Version {
-					version,
-					value,
-				});
-			} else {
-				self.database.datastore.insert(
-					key.clone(),
-					RwLock::new(Versions::from(Version {
+		// Check if background merge worker is active
+		if let Some(handle) = self.database.transaction_merge_handle.read().as_ref() {
+			// Push the version to the merge worker queue
+			self.database.transaction_merge_injector.push(version);
+			// Wake up the merge worker to process the new entry
+			handle.thread().unpark();
+			// Transaction is complete
+		} else {
+			// Loop over the updates in the writeset
+			for (key, value) in entry.writeset.iter() {
+				// Clone the value for insertion
+				let value = value.clone();
+				// Check if this key already exists
+				if let Some(entry) = self.database.datastore.get(key) {
+					entry.value().write().push(Version {
 						version,
 						value,
-					})),
-				);
+					});
+				} else {
+					self.database.datastore.insert(
+						key.clone(),
+						RwLock::new(Versions::from(Version {
+							version,
+							value,
+						})),
+					);
+				}
 			}
+			// Remove this transaction from the merge queue
+			self.database.transaction_merge_queue.remove(&version);
 		}
-		// Remove this transaction from the merge queue
-		self.database.transaction_merge_queue.remove(&version);
 		// Continue
 		Ok(())
 	}

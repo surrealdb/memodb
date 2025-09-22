@@ -301,6 +301,7 @@ version = "0.8.0"
 dependencies = [
  "arc-swap",
  "criterion",
+ "crossbeam-deque",
  "crossbeam-queue",
  "crossbeam-skiplist",
  "parking_lot",
