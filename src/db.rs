@@ -230,7 +230,7 @@ where
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
 		// Disable background workers
-		self.background_threads_enabled.store(false, Ordering::Release);
+		self.background_threads_enabled.store(false, Ordering::Relaxed);
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
 			handle.thread().unpark();
@@ -254,7 +254,7 @@ where
 			// Spawn a new thread to handle periodic cleanup
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
-				while db.background_threads_enabled.load(Ordering::SeqCst) {
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
 					{
@@ -304,7 +304,7 @@ where
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
-				while db.background_threads_enabled.load(Ordering::SeqCst) {
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
 					// Get the current timestamp version
