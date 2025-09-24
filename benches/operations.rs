@@ -140,7 +140,7 @@ fn bench_put_operations(c: &mut Criterion) {
 				&test_data,
 				|b, data| {
 					b.iter_batched(
-						|| create_database::<Key, Val>(),
+						create_database::<Key, Val>,
 						|db| {
 							let mut tx = db.transaction(true);
 							for (key, value) in data {
