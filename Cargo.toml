@@ -20,6 +20,7 @@ license = "Apache-2.0"
 
 [dependencies]
 arc-swap = "1.7.1"
+crossbeam-deque = "0.8.5"
 crossbeam-queue = "0.3.12"
 crossbeam-skiplist = "0.1.3"
 parking_lot = "0.12.3"
@@ -28,3 +29,8 @@ thiserror = "1.0.58"
 
 [dev-dependencies]
 rand = "0.9.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "operations"
+harness = false

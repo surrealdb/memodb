@@ -19,6 +19,10 @@ use crate::options::{DatabaseOptions, DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTER
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
+use crate::version::Version;
+use crate::versions::Versions;
+use crossbeam_deque::Steal;
+use parking_lot::RwLock;
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
@@ -112,6 +116,9 @@ where
 		}
 		if opts.enable_gc {
 			db.initialise_garbage_worker();
+		}
+		if opts.enable_merge_worker {
+			db.initialise_merge_worker();
 		}
 		// Return the database
 		db
@@ -230,7 +237,7 @@ where
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
 		// Disable background workers
-		self.background_threads_enabled.store(false, Ordering::Release);
+		self.background_threads_enabled.store(false, Ordering::Relaxed);
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
 			handle.thread().unpark();
@@ -238,6 +245,11 @@ where
 		}
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.garbage_collection_handle.write().take() {
+			handle.thread().unpark();
+			handle.join().unwrap();
+		}
+		// Wait for the merge worker thread to exit
+		if let Some(handle) = self.transaction_merge_handle.write().take() {
 			handle.thread().unpark();
 			handle.join().unwrap();
 		}
@@ -254,7 +266,7 @@ where
 			// Spawn a new thread to handle periodic cleanup
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
-				while db.background_threads_enabled.load(Ordering::SeqCst) {
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
 					{
@@ -304,7 +316,7 @@ where
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
-				while db.background_threads_enabled.load(Ordering::SeqCst) {
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
 					// Get the current timestamp version
@@ -339,6 +351,66 @@ where
 			});
 			// Store and track the thread handle
 			*self.inner.garbage_collection_handle.write() = Some(handle);
+		}
+	}
+
+	/// Start the merge worker thread after creating the database
+	fn initialise_merge_worker(&self) {
+		// Clone the underlying datastore inner
+		let db = self.inner.clone();
+		// Check if a background thread is already running
+		if db.transaction_merge_handle.read().is_none() {
+			// Spawn a new thread to handle continuous merging
+			let handle = std::thread::spawn(move || {
+				// Check whether the merge worker process is enabled
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
+					// Try to steal a version from the injector
+					match db.transaction_merge_injector.steal() {
+						// A version was stolen so process it
+						Steal::Success(version) => {
+							// Get the merge entry from the queue
+							if let Some(entry) = db.transaction_merge_queue.get(&version) {
+								// Fetch the merge entry
+								let entry = entry.value();
+								// Loop over the updates in the writeset
+								for (key, value) in entry.writeset.iter() {
+									// Clone the value for insertion
+									let value = value.clone();
+									// Check if this key already exists
+									if let Some(entry) = db.datastore.get(key) {
+										entry.value().write().push(Version {
+											version,
+											value,
+										});
+									} else {
+										db.datastore.insert(
+											key.clone(),
+											RwLock::new(Versions::from(Version {
+												version,
+												value,
+											})),
+										);
+									}
+								}
+								// Remove this transaction from the merge queue
+								db.transaction_merge_queue.remove(&version);
+							}
+							// Process more immediately if available
+							std::thread::yield_now();
+						}
+						// No work available, park until unparked
+						Steal::Empty => {
+							std::thread::park();
+						}
+						// Another thread is stealing so yield
+						Steal::Retry => {
+							std::thread::yield_now();
+						}
+					}
+				}
+			});
+			// Store and track the thread handle
+			*self.inner.transaction_merge_handle.write() = Some(handle);
 		}
 	}
 }
