@@ -1978,8 +1978,10 @@ mod tests {
 		use std::sync::atomic::Ordering;
 
 		// Create database
-		let mut opts = DatabaseOptions::default();
-		opts.enable_merge_worker = false;
+		let opts = DatabaseOptions {
+			enable_merge_worker: false,
+			..Default::default()
+		};
 		let db: Database<&str, &str> = Database::new_with_options(opts);
 
 		// Ensure elements reside in the merge queue
@@ -1993,8 +1995,8 @@ mod tests {
 		txn1.commit().unwrap();
 
 		// Verify data is in datastore and NOT in merge queue
-		assert_eq!(db.transaction_merge_queue.len(), 0, "Data should be in merge queue");
-		assert!(db.datastore.len() > 0, "Data should NOT be in datastore yet");
+		assert!(db.transaction_merge_queue.is_empty(), "Data should be in merge queue");
+		assert!(!db.datastore.is_empty(), "Data should NOT be in datastore yet");
 
 		// Transaction 2: Add uncommitted data and scan
 		let mut txn2 = db.transaction(true);
@@ -2016,8 +2018,10 @@ mod tests {
 		use std::sync::atomic::Ordering;
 
 		// Create database
-		let mut opts = DatabaseOptions::default();
-		opts.enable_merge_worker = true;
+		let opts = DatabaseOptions {
+			enable_merge_worker: true,
+			..Default::default()
+		};
 		let db: Database<&str, &str> = Database::new_with_options(opts);
 
 		// Ensure elements reside in the merge queue
@@ -2031,8 +2035,8 @@ mod tests {
 		txn1.commit().unwrap();
 
 		// Verify data is in merge queue and NOT in datastore
-		assert!(db.transaction_merge_queue.len() > 0, "Data should be in merge queue");
-		assert_eq!(db.datastore.len(), 0, "Data should NOT be in datastore yet");
+		assert!(!db.transaction_merge_queue.is_empty(), "Data should be in merge queue");
+		assert!(db.datastore.is_empty(), "Data should NOT be in datastore yet");
 
 		// Transaction 2: Add uncommitted data and scan
 		let mut txn2 = db.transaction(true);
@@ -2349,7 +2353,7 @@ mod tests {
 
 		// We should have many successful commits
 		assert!(count > 0, "Should have at least some successful commits");
-		assert!(count <= (num_threads * 10) as usize, "Should not exceed maximum possible commits");
+		assert!(count <= (num_threads * 10), "Should not exceed maximum possible commits");
 
 		// Test that we can still perform operations
 		let mut final_tx = db.transaction(true);
