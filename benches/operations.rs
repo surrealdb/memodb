@@ -22,6 +22,26 @@ type Val = Vec<u8>;
 
 const SEED: u64 = 42;
 
+// Helper function to create a database with configuration from environment
+fn create_database<K, V>() -> Database<K, V>
+where
+	K: Ord + Clone + std::fmt::Debug + Sync + Send + 'static,
+	V: Eq + Clone + std::fmt::Debug + Sync + Send + 'static,
+{
+	// Check environment variable to determine merge worker configuration
+	let enable_merge = std::env::var("MEMODB_MERGE_WORKER")
+		.unwrap_or_else(|_| "false".to_string())
+		.parse::<bool>()
+		.unwrap_or(false);
+
+	let opts = DatabaseOptions {
+		enable_merge_worker: enable_merge,
+		..Default::default()
+	};
+
+	Database::new_with_options(opts)
+}
+
 // Helper functions for generating test data
 fn generate_key(rng: &mut StdRng, size: usize) -> Key {
 	let mut key = vec![0u8; size];
@@ -51,7 +71,7 @@ fn setup_database_with_data(
 	key_size: usize,
 	value_size: usize,
 ) -> Database<Key, Val> {
-	let db = Database::new();
+	let db = create_database();
 	let mut rng = StdRng::seed_from_u64(SEED);
 
 	{
@@ -68,7 +88,7 @@ fn setup_database_with_data(
 }
 
 fn setup_database_with_sequential_data(count: usize, value_size: usize) -> Database<Key, Val> {
-	let db = Database::new();
+	let db = create_database();
 
 	{
 		let mut tx = db.transaction(true);
@@ -85,7 +105,7 @@ fn setup_database_with_sequential_data(count: usize, value_size: usize) -> Datab
 
 // Basic Operations Benchmarks
 fn bench_transaction_creation(c: &mut Criterion) {
-	let db = Database::<Key, Val>::new();
+	let db: Database<Key, Val> = create_database();
 
 	c.bench_function("transaction_creation_read", |b| {
 		b.iter(|| {
@@ -120,7 +140,7 @@ fn bench_put_operations(c: &mut Criterion) {
 				&test_data,
 				|b, data| {
 					b.iter_batched(
-						|| Database::<Key, Val>::new(),
+						|| create_database::<Key, Val>(),
 						|db| {
 							let mut tx = db.transaction(true);
 							for (key, value) in data {
@@ -674,7 +694,14 @@ fn bench_database_options(c: &mut Criterion) {
 		),
 	];
 
-	for (config_name, options) in configurations {
+	for (config_name, mut options) in configurations {
+		// Apply merge worker setting from environment
+		let enable_merge = std::env::var("MEMODB_MERGE_WORKER")
+			.unwrap_or_else(|_| "true".to_string())
+			.parse::<bool>()
+			.unwrap_or(true);
+		options.enable_merge_worker = enable_merge;
+
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate data for consistent benchmarking

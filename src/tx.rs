@@ -17,6 +17,7 @@
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
+use crate::iter::MergeIterator;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
@@ -25,6 +26,7 @@ use parking_lot::RwLock;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::ops::Bound;
 use std::ops::Range;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -746,13 +748,13 @@ where
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Prepare result vector
+		// Prepare result count
 		let mut res = 0;
 		// Compute the range
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
-		let mut skip = skip.unwrap_or_default();
+		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
@@ -776,111 +778,33 @@ where
 				};
 			}
 		}
-		// Combine writeset and merge queue entries
+		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
-		// Add the current transaction's writeset
-		for (k, v) in self.writeset.range(beg..end) {
-			combined_writeset.insert(k.clone(), v.clone());
-		}
-		// Add the merge queue entries in reverse order
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
 			if !entry.is_removed() {
 				for (k, v) in entry.value().writeset.range(beg..end) {
-					// Only insert if not already present
 					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 				}
 			}
 		}
-		// Get iterators
-		let mut tree_iter = self.database.datastore.range(beg..end);
-		let mut join_iter = combined_writeset.range(beg..end);
-		// Get the first items manually
-		let (mut tree_next, mut join_next) = match direction {
-			Direction::Forward => (tree_iter.next(), join_iter.next()),
-			Direction::Reverse => (tree_iter.next_back(), join_iter.next_back()),
-		};
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res < l) {
-			match (tree_next.clone(), join_next) {
-				// Both iterators have items, we need to compare
-				(Some(t_entry), Some((jk, jv))) => {
-					let tk = t_entry.key();
-					let tv_lock = t_entry.value();
-					let tv = tv_lock.read();
-					// Determine which key to process based on direction
-					let tree_first = match direction {
-						Direction::Forward => tk < jk,
-						Direction::Reverse => tk > jk,
-					};
-					if tree_first {
-						// Add this entry if it is not a delete
-						if tv.exists_version(version) {
-							if skip > 0 {
-								skip -= 1;
-							} else {
-								res += 1;
-							}
-						}
-						tree_next = match direction {
-							Direction::Forward => tree_iter.next(),
-							Direction::Reverse => tree_iter.next_back(),
-						};
-					} else {
-						// Advance the tree if the keys match
-						if tk == jk {
-							tree_next = match direction {
-								Direction::Forward => tree_iter.next(),
-								Direction::Reverse => tree_iter.next_back(),
-							};
-						}
-						// Add this entry if it is not a delete
-						if jv.is_some() {
-							if skip > 0 {
-								skip -= 1;
-							} else {
-								res += 1;
-							}
-						}
-						join_next = match direction {
-							Direction::Forward => join_iter.next(),
-							Direction::Reverse => join_iter.next_back(),
-						};
+		// Create the 3-way merge iterator
+		let mut iter = MergeIterator::new(
+			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
+			self.writeset.range(beg.clone()..end.clone()),
+			direction,
+			version,
+			skip,
+		);
+		// Process entries with skip and limit
+		while let Some(exists) = iter.next_count() {
+			if exists {
+				res += 1;
+				if let Some(l) = limit {
+					if res >= l {
+						break;
 					}
 				}
-				// Only the left iterator has any items
-				(Some(t_entry), _) => {
-					let tv_lock = t_entry.value();
-					let tv = tv_lock.read();
-					// Add this entry if it is not a delete
-					if tv.exists_version(version) {
-						if skip > 0 {
-							skip -= 1;
-						} else {
-							res += 1;
-						}
-					}
-					tree_next = match direction {
-						Direction::Forward => tree_iter.next(),
-						Direction::Reverse => tree_iter.next_back(),
-					};
-				}
-				// Only the right iterator has any items
-				(_, Some((_, jv))) => {
-					// Add this entry if it is not a delete
-					if jv.is_some() {
-						if skip > 0 {
-							skip -= 1;
-						} else {
-							res += 1;
-						}
-					}
-					join_next = match direction {
-						Direction::Forward => join_iter.next(),
-						Direction::Reverse => join_iter.next_back(),
-					};
-				}
-				// Both iterators are exhausted
-				_ => break,
 			}
 		}
 		// Return result
@@ -912,7 +836,7 @@ where
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
-		let mut skip = skip.unwrap_or_default();
+		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
@@ -936,112 +860,33 @@ where
 				};
 			}
 		}
-		// Combine writeset and merge queue entries
+		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
-		// Add the current transaction's writeset
-		for (k, v) in self.writeset.range(beg..end) {
-			combined_writeset.insert(k.clone(), v.clone());
-		}
-		// Add the merge queue entries in reverse order
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
 			if !entry.is_removed() {
 				for (k, v) in entry.value().writeset.range(beg..end) {
-					// Only insert if not already present
 					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 				}
 			}
 		}
-		// Get iterators
-		let mut tree_iter = self.database.datastore.range(beg..end);
-		let mut join_iter = combined_writeset.range(beg..end);
-		// Get the first items manually
-		let (mut tree_next, mut join_next) = match direction {
-			Direction::Forward => (tree_iter.next(), join_iter.next()),
-			Direction::Reverse => (tree_iter.next_back(), join_iter.next_back()),
-		};
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next.clone(), join_next) {
-				// Both iterators have items, we need to compare
-				(Some(t_entry), Some((jk, jv))) => {
-					let tk = t_entry.key();
-					let tv_lock = t_entry.value();
-					let tv = tv_lock.read();
-					// Determine which key to process based on direction
-					let tree_first = match direction {
-						Direction::Forward => tk < jk,
-						Direction::Reverse => tk > jk,
-					};
-					if tree_first {
-						// Add this entry if it is not a delete
-						if tv.exists_version(version) {
-							if skip > 0 {
-								skip -= 1;
-							} else {
-								res.push(tk.clone());
-							}
-						}
-						tree_next = match direction {
-							Direction::Forward => tree_iter.next(),
-							Direction::Reverse => tree_iter.next_back(),
-						};
-					} else {
-						// Advance the tree if the keys match
-						if tk == jk {
-							tree_next = match direction {
-								Direction::Forward => tree_iter.next(),
-								Direction::Reverse => tree_iter.next_back(),
-							};
-						}
-						// Add this entry if it is not a delete
-						if jv.is_some() {
-							if skip > 0 {
-								skip -= 1;
-							} else {
-								res.push(jk.clone());
-							}
-						}
-						join_next = match direction {
-							Direction::Forward => join_iter.next(),
-							Direction::Reverse => join_iter.next_back(),
-						};
+		// Create the 3-way merge iterator
+		let mut iter = MergeIterator::new(
+			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
+			self.writeset.range(beg.clone()..end.clone()),
+			direction,
+			version,
+			skip,
+		);
+		// Process entries with skip and limit
+		while let Some((key, exists)) = iter.next_key() {
+			if exists {
+				res.push(key);
+				if let Some(l) = limit {
+					if res.len() >= l {
+						break;
 					}
 				}
-				// Only the left iterator has any items
-				(Some(t_entry), _) => {
-					let tk = t_entry.key();
-					let tv_lock = t_entry.value();
-					let tv = tv_lock.read();
-					// Add this entry if it is not a delete
-					if tv.exists_version(version) {
-						if skip > 0 {
-							skip -= 1;
-						} else {
-							res.push(tk.clone());
-						}
-					}
-					tree_next = match direction {
-						Direction::Forward => tree_iter.next(),
-						Direction::Reverse => tree_iter.next_back(),
-					};
-				}
-				// Only the right iterator has any items
-				(_, Some((jk, jv))) => {
-					// Add this entry if it is not a delete
-					if jv.is_some() {
-						if skip > 0 {
-							skip -= 1;
-						} else {
-							res.push(jk.clone());
-						}
-					}
-					join_next = match direction {
-						Direction::Forward => join_iter.next(),
-						Direction::Reverse => join_iter.next_back(),
-					};
-				}
-				// Both iterators are exhausted
-				_ => break,
 			}
 		}
 		// Return result
@@ -1073,7 +918,7 @@ where
 		let beg = rng.start.borrow();
 		let end = rng.end.borrow();
 		// Calculate how many items to skip
-		let mut skip = skip.unwrap_or_default();
+		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
@@ -1097,112 +942,35 @@ where
 				};
 			}
 		}
-		// Combine writeset and merge queue entries
+		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
-		// Add the current transaction's writeset
-		for (k, v) in self.writeset.range(beg..end) {
-			combined_writeset.insert(k.clone(), v.clone());
-		}
-		// Add the merge queue entries in reverse order
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
 			if !entry.is_removed() {
 				for (k, v) in entry.value().writeset.range(beg..end) {
-					// Only insert if not already present
 					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 				}
 			}
 		}
-		// Get iterators
-		let mut tree_iter = self.database.datastore.range(beg..end);
-		let mut join_iter = combined_writeset.range(beg..end);
-		// Get the first items manually
-		let (mut tree_next, mut join_next) = match direction {
-			Direction::Forward => (tree_iter.next(), join_iter.next()),
-			Direction::Reverse => (tree_iter.next_back(), join_iter.next_back()),
-		};
-		// Merge results until limit is reached
-		while limit.is_none() || limit.is_some_and(|l| res.len() < l) {
-			match (tree_next.clone(), join_next) {
-				// Both iterators have items, we need to compare
-				(Some(t_entry), Some((jk, jv))) => {
-					let tk = t_entry.key();
-					let tv_lock = t_entry.value();
-					let tv = tv_lock.read();
-					// Determine which key to process based on direction
-					let tree_first = match direction {
-						Direction::Forward => tk < jk,
-						Direction::Reverse => tk > jk,
-					};
-					if tree_first {
-						// Add this entry if it is not a delete
-						if let Some(v) = tv.fetch_version(version) {
-							if skip > 0 {
-								skip -= 1;
-							} else {
-								res.push((tk.clone(), v.as_ref().clone()));
-							}
-						}
-						tree_next = match direction {
-							Direction::Forward => tree_iter.next(),
-							Direction::Reverse => tree_iter.next_back(),
-						};
-					} else {
-						// Advance the tree if the keys match
-						if tk == jk {
-							tree_next = match direction {
-								Direction::Forward => tree_iter.next(),
-								Direction::Reverse => tree_iter.next_back(),
-							};
-						}
-						// Add this entry if it is not a delete
-						if let Some(v) = jv.as_ref().map(|arc| arc.as_ref().clone()) {
-							if skip > 0 {
-								skip -= 1;
-							} else {
-								res.push((jk.clone(), v));
-							}
-						}
-						join_next = match direction {
-							Direction::Forward => join_iter.next(),
-							Direction::Reverse => join_iter.next_back(),
-						};
+		// Create the 3-way merge iterator
+		let iter = MergeIterator::new(
+			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
+			self.writeset.range(beg.clone()..end.clone()),
+			direction,
+			version,
+			skip,
+		);
+		// Process entries with skip and limit
+		for (key, val) in iter {
+			// Only include non-deleted entries
+			if let Some(val) = val {
+				res.push((key, val.as_ref().clone()));
+				// Check limit
+				if let Some(l) = limit {
+					if res.len() >= l {
+						break;
 					}
 				}
-				// Only the left iterator has any items
-				(Some(t_entry), _) => {
-					let tk = t_entry.key();
-					let tv_lock = t_entry.value();
-					let tv = tv_lock.read();
-					// Add this entry if it is not a delete
-					if let Some(v) = tv.fetch_version(version) {
-						if skip > 0 {
-							skip -= 1;
-						} else {
-							res.push((tk.clone(), v.as_ref().clone()));
-						}
-					}
-					tree_next = match direction {
-						Direction::Forward => tree_iter.next(),
-						Direction::Reverse => tree_iter.next_back(),
-					};
-				}
-				// Only the right iterator has any items
-				(_, Some((jk, jv))) => {
-					// Add this entry if it is not a delete
-					if let Some(v) = jv.as_ref().map(|arc| arc.as_ref().clone()) {
-						if skip > 0 {
-							skip -= 1;
-						} else {
-							res.push((jk.clone(), v));
-						}
-					}
-					join_next = match direction {
-						Direction::Forward => join_iter.next(),
-						Direction::Reverse => join_iter.next_back(),
-					};
-				}
-				// Both iterators are exhausted
-				_ => break,
 			}
 		}
 		// Return result
@@ -1374,7 +1142,7 @@ where
 #[cfg(test)]
 mod tests {
 
-	use crate::Database;
+	use crate::{Database, DatabaseOptions};
 
 	#[test]
 	fn mvcc_non_conflicting_keys_should_succeed() {
@@ -2151,11 +1919,11 @@ mod tests {
 	}
 
 	#[test]
-	fn test_range_scan_with_merge_queue() {
-		// Test that range scans correctly see data in merge queue
+	fn test_range_scan() {
+		// Create database
 		let db: Database<&str, &str> = Database::new();
 
-		// Transaction 1: Add initial data and commit (goes to merge queue)
+		// Transaction 1: Add initial data and commit
 		let mut txn1 = db.transaction(true);
 		txn1.set("a", "1").unwrap();
 		txn1.set("b", "2").unwrap();
@@ -2189,13 +1957,11 @@ mod tests {
 		assert_eq!(res[0], ("c", "3"));
 		assert_eq!(res[1], ("d", "4"));
 
-		// Test reverse scan - temporarily skip this test
-		// TODO: Fix reverse scan with merge queue
-		// let res = txn2.scan_reverse("b".."e", None, None).unwrap();
-		// assert_eq!(res.len(), 3);
-		// assert_eq!(res[0], ("d", "4"));
-		// assert_eq!(res[1], ("c", "3"));
-		// assert_eq!(res[2], ("b", "2"));
+		let res = txn2.scan_reverse("b".."e", None, None).unwrap();
+		assert_eq!(res.len(), 3);
+		assert_eq!(res[0], ("d", "4"));
+		assert_eq!(res[1], ("c", "3"));
+		assert_eq!(res[2], ("b", "2"));
 
 		// Test empty range
 		let res = txn2.scan("x".."z", None, None).unwrap();
@@ -2205,6 +1971,82 @@ mod tests {
 		let res = txn2.scan("c".."d", None, None).unwrap();
 		assert_eq!(res.len(), 1);
 		assert_eq!(res[0], ("c", "3"));
+	}
+
+	#[test]
+	fn test_range_scan_with_sync_merge_queue() {
+		use std::sync::atomic::Ordering;
+
+		// Create database
+		let mut opts = DatabaseOptions::default();
+		opts.enable_merge_worker = false;
+		let db: Database<&str, &str> = Database::new_with_options(opts);
+
+		// Ensure elements reside in the merge queue
+		db.background_threads_enabled.store(false, Ordering::Relaxed);
+
+		// Transaction 1: Add initial data and commit
+		let mut txn1 = db.transaction(true);
+		txn1.set("a", "1").unwrap();
+		txn1.set("c", "3").unwrap();
+		txn1.set("e", "5").unwrap();
+		txn1.commit().unwrap();
+
+		// Verify data is in datastore and NOT in merge queue
+		assert_eq!(db.transaction_merge_queue.len(), 0, "Data should be in merge queue");
+		assert!(db.datastore.len() > 0, "Data should NOT be in datastore yet");
+
+		// Transaction 2: Add uncommitted data and scan
+		let mut txn2 = db.transaction(true);
+		txn2.set("b", "2").unwrap();
+		txn2.set("d", "4").unwrap();
+
+		// Scan should see both committed (from merge queue) and uncommitted data
+		let res = txn2.scan("a".."f", None, None).unwrap();
+		assert_eq!(res.len(), 5);
+		assert_eq!(res[0], ("a", "1")); // From merge queue
+		assert_eq!(res[1], ("b", "2")); // From current txn
+		assert_eq!(res[2], ("c", "3")); // From merge queue
+		assert_eq!(res[3], ("d", "4")); // From current txn
+		assert_eq!(res[4], ("e", "5")); // From merge queue
+	}
+
+	#[test]
+	fn test_range_scan_with_async_merge_queue() {
+		use std::sync::atomic::Ordering;
+
+		// Create database
+		let mut opts = DatabaseOptions::default();
+		opts.enable_merge_worker = true;
+		let db: Database<&str, &str> = Database::new_with_options(opts);
+
+		// Ensure elements reside in the merge queue
+		db.background_threads_enabled.store(false, Ordering::Relaxed);
+
+		// Transaction 1: Add initial data and commit
+		let mut txn1 = db.transaction(true);
+		txn1.set("a", "1").unwrap();
+		txn1.set("c", "3").unwrap();
+		txn1.set("e", "5").unwrap();
+		txn1.commit().unwrap();
+
+		// Verify data is in merge queue and NOT in datastore
+		assert!(db.transaction_merge_queue.len() > 0, "Data should be in merge queue");
+		assert_eq!(db.datastore.len(), 0, "Data should NOT be in datastore yet");
+
+		// Transaction 2: Add uncommitted data and scan
+		let mut txn2 = db.transaction(true);
+		txn2.set("b", "2").unwrap();
+		txn2.set("d", "4").unwrap();
+
+		// Scan should see both committed (from merge queue) and uncommitted data
+		let res = txn2.scan("a".."f", None, None).unwrap();
+		assert_eq!(res.len(), 5);
+		assert_eq!(res[0], ("a", "1")); // From merge queue
+		assert_eq!(res[1], ("b", "2")); // From current txn
+		assert_eq!(res[2], ("c", "3")); // From merge queue
+		assert_eq!(res[3], ("d", "4")); // From current txn
+		assert_eq!(res[4], ("e", "5")); // From merge queue
 	}
 
 	#[test]

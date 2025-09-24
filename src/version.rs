@@ -46,6 +46,6 @@ where
 {
 	#[inline]
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-		Some(self.version.cmp(&other.version))
+		Some(self.cmp(other))
 	}
 }
