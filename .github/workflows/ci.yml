@@ -4,38 +4,80 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  fmt:
+  test:
+    name: Test - ${{ matrix.os }} / ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+  format:
+    name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Run tests
-        run: cargo fmt --all --check
 
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run tests
-        run: cargo test --locked --workspace --all
-
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run tests
-        run: cargo check --locked --workspace --all-targets --all-features
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
   clippy:
+    name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run tests
-        run: cargo clippy --locked --workspace --all-targets --all-features --tests --benches -- -D warnings
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  bench:
+    name: Benchmark Compilation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check benchmarks compile
+        run: cargo bench --no-run
