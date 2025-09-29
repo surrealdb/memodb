@@ -23,6 +23,7 @@ use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
 use parking_lot::RwLock;
+use serde::Serialize;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -293,7 +294,11 @@ where
 	}
 
 	/// Commit the transaction and store all changes
-	pub fn commit(&mut self) -> Result<(), Error> {
+	pub fn commit(&mut self) -> Result<(), Error>
+	where
+		K: Serialize,
+		V: Serialize,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -378,6 +383,12 @@ where
 							value,
 						})),
 					);
+				}
+			}
+			// Append the transaction to the persistence layer
+			if let Some(p) = self.database.persistence.read().clone() {
+				if let Err(e) = p.append(version, entry.writeset.as_ref()) {
+					return Err(Error::TxCommitNotPersisted(e));
 				}
 			}
 			// Remove this transaction from the merge queue

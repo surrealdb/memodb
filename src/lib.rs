@@ -14,6 +14,7 @@
 
 #![allow(clippy::bool_comparison)]
 
+mod compression;
 mod db;
 mod direction;
 mod err;
@@ -21,6 +22,7 @@ mod inner;
 mod iter;
 mod options;
 mod oracle;
+mod persistence;
 mod pool;
 mod queue;
 mod tx;
@@ -36,5 +38,7 @@ pub use self::db::*;
 pub use self::err::*;
 #[doc(inline)]
 pub use self::options::*;
+#[doc(inline)]
+pub use self::persistence::*;
 #[doc(inline)]
 pub use self::tx::*;
