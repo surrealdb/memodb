@@ -2,10 +2,10 @@
 
 <p align="center">
     <a href="https://surrealdb.com#gh-dark-mode-only" target="_blank">
-        <img width="200" src="/img/white/logo.svg" alt="MemoDB Logo">
+        <img width="200" src="/img/white/logo.svg" alt="SurrealMX Logo">
     </a>
     <a href="https://surrealdb.com#gh-light-mode-only" target="_blank">
-        <img width="200" src="/img/black/logo.svg" alt="MemoDB Logo">
+        <img width="200" src="/img/black/logo.svg" alt="SurrealMX Logo">
     </a>
 </p>
 
@@ -14,13 +14,13 @@
 <br>
 
 <p align="center">
-	<a href="https://github.com/surrealdb/memodb"><img src="https://img.shields.io/badge/status-stable-ff00bb.svg?style=flat-square"></a>
+	<a href="https://github.com/surrealdb/surrealmx"><img src="https://img.shields.io/badge/status-stable-ff00bb.svg?style=flat-square"></a>
 	&nbsp;
-	<a href="https://docs.rs/memodb/"><img src="https://img.shields.io/docsrs/memodb?style=flat-square"></a>
+	<a href="https://docs.rs/surrealmx/"><img src="https://img.shields.io/docsrs/surrealmx?style=flat-square"></a>
 	&nbsp;
-	<a href="https://crates.io/crates/memodb"><img src="https://img.shields.io/crates/v/memodb?style=flat-square"></a>
+	<a href="https://crates.io/crates/surrealmx"><img src="https://img.shields.io/crates/v/surrealmx?style=flat-square"></a>
 	&nbsp;
-	<a href="https://github.com/surrealdb/memodb"><img src="https://img.shields.io/badge/license-Apache_License_2.0-00bfff.svg?style=flat-square"></a>
+	<a href="https://github.com/surrealdb/surrealmx"><img src="https://img.shields.io/badge/license-Apache_License_2.0-00bfff.svg?style=flat-square"></a>
 </p>
 
 #### Features
@@ -41,7 +41,7 @@
 #### Quick start
 
 ```rust
-use memodb::{Database, DatabaseOptions};
+use surrealmx::{Database, DatabaseOptions};
 
 fn main() {
     // Create a database with custom settings
@@ -68,7 +68,7 @@ intervals. These workers can be disabled through `DatabaseOptions` by setting
 triggered manually using the `run_cleanup` and `run_gc` methods.
 
 ```rust
-use memodb::{Database, DatabaseOptions};
+use surrealmx::{Database, DatabaseOptions};
 
 fn main() {
     // Create a database with custom settings
@@ -102,7 +102,7 @@ MemoDB supports optional persistence with two modes:
 Provides maximum durability by logging every change to an append-only log and taking periodic snapshots.
 
 ```rust
-use memodb::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -126,7 +126,7 @@ fn main() -> std::io::Result<()> {
 Provides good performance with periodic durability by taking snapshots without logging individual changes.
 
 ```rust
-use memodb::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -168,7 +168,7 @@ fn main() -> std::io::Result<()> {
 ##### Advanced Configuration Example
 
 ```rust
-use memodb::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode, FsyncMode, CompressionMode};
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode, FsyncMode, CompressionMode};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -207,7 +207,7 @@ MemoDB's MVCC (Multi-Version Concurrency Control) design allows you to read data
 - **Conflict resolution**: Compare different versions of data to understand changes
 
 ```rust
-use memodb::Database;
+use surrealmx::Database;
 
 fn main() {
     let db: Database<&str, &str> = Database::new();
@@ -268,7 +268,7 @@ Provides excellent performance with strong consistency guarantees. Transactions 
 - **No non-repeatable reads**: Reading the same key multiple times returns the same value
 
 ```rust
-use memodb::Database;
+use surrealmx::Database;
 
 fn main() {
     let db: Database<&str, i32> = Database::new();
@@ -296,7 +296,7 @@ Provides the strongest consistency guarantee by detecting read-write conflicts a
 - **Higher abort rate**: More transactions may need to retry due to conflicts
 
 ```rust
-use memodb::{Database, Error};
+use surrealmx::{Database, Error};
 
 fn main() {
     let db: Database<&str, i32> = Database::new();
@@ -349,7 +349,7 @@ MemoDB provides powerful range-based operations for scanning, counting, and iter
 ##### Basic range scanning
 
 ```rust
-use memodb::Database;
+use surrealmx::Database;
 
 fn main() {
     let db: Database<&str, &str> = Database::new();
@@ -386,7 +386,7 @@ fn main() {
 ##### Pagination and reverse iteration
 
 ```rust
-use memodb::Database;
+use surrealmx::Database;
 
 fn main() {
     let db: Database<&str, i32> = Database::new();
@@ -419,7 +419,7 @@ fn main() {
 ##### Historical range operations
 
 ```rust
-use memodb::Database;
+use surrealmx::Database;
 
 fn main() {
     let db: Database<&str, &str> = Database::new();

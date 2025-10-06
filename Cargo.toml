@@ -1,13 +1,13 @@
 [package]
-name = "memodb"
+name = "surrealmx"
 publish = true
 edition = "2021"
 version = "0.8.0"
 readme = "CARGO.md"
 authors = ["Tobie Morgan Hitchcock <tobie@surrealdb.com>"]
 description = "An embedded, in-memory, lock-free, transaction-based, key-value database engine"
-repository = "https://github.com/surrealdb/memodb"
-homepage = "https://github.com/surrealdb/memodb"
+repository = "https://github.com/surrealdb/surrealmx"
+homepage = "https://github.com/surrealdb/surrealmx"
 keywords = [
 	"database",
 	"embedded-database",

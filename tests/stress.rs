@@ -1,4 +1,4 @@
-use memodb::Database;
+use surrealmx::Database;
 use rand::Rng;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

@@ -1,5 +1,5 @@
-use memodb::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};
 use std::time::Duration;
+use surrealmx::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};
 use tempfile::TempDir;
 
 #[test]

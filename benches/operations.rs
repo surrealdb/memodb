@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use memodb::{Database, DatabaseOptions};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::sync::Arc;
+use surrealmx::{Database, DatabaseOptions};
 
 type Key = Vec<u8>;
 type Val = Vec<u8>;
