@@ -1,8 +1,8 @@
-use surrealmx::Database;
 use rand::Rng;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use surrealmx::Database;
 
 #[test]
 fn concurrent_random_transactions() {
