@@ -474,3 +474,7 @@ fn main() {
 - `skip`: Optional number of items to skip (for pagination)
 - `limit`: Optional maximum number of items to return
 - `version`: Specific version timestamp for historical operations
+
+#### Project History
+
+**Note:** This project was originally developed under the name `memodb`. It has been renamed to `surrealmx` to better reflect its evolution and alignment with the SurrealDB ecosystem.
