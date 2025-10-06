@@ -13,7 +13,7 @@ pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
 /// Default interval at which the timestamp oracle resyncs with the system clock.
 pub const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Configuration options for [`Database`].
+/// Configuration options for [`crate::Database`].
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {
 	/// Maximum number of transactions kept in the pool.
